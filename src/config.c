@@ -41,12 +41,12 @@ void config_default(Config *c)
     c->opacity = 1.0f;
     c->shell[0] = 0;           /* empty => $SHELL */
     c->working_dir[0] = 0;     /* empty => $HOME */
-    /* xdg-shell app_id (NextFeature #1): window rules and taskbar grouping key off it, so the default
+    /* xdg-shell app_id: window rules and taskbar grouping key off it, so the default
        reads like the display name. DEF_APP_ID in k-term.h is the single source (see below). */
     snprintf(c->app_id, sizeof(c->app_id), DEF_APP_ID);
-    c->clear_scrollback = 1;   /* CSI 3 J drops the scrollback (NextFeature.md: on by default) */
-    c->copy_on_release = 0;    /* NextFeature #2: selecting no longer copies unless asked */
-    c->repeat_delay = 300;     /* NextFeature #3: ms before a held key repeats (0 = compositor's) */
+    c->clear_scrollback = 1;   /* CSI 3 J drops the scrollback (on by default) */
+    c->copy_on_release = 0;    /* selecting does not copy unless the user asks (Ctrl+Shift+C does) */
+    c->repeat_delay = 300;     /* ms before a held key repeats (0 = K-Term does not repeat) */
     c->repeat_rate = 30;       /* repeats per second once repeating */
     c->loglevel = L_WARN;
 }
@@ -122,11 +122,11 @@ static void apply(Config *c, const char *key, char *val)
         /* 1 (default) = CSI 3 J also drops the scrollback; 0 = keep the history */
         c->clear_scrollback = cfg_bool(val) ? 1 : 0;
     } else if (!strcmp(key, "copy_on_release")) {
-        /* NextFeature #2: 0 (default) = releasing the drag only selects; 1 = also copy to the
-           clipboard (the pre-#2 behaviour). Ctrl+Shift+C copies either way. */
+        /* 0 (default) = releasing the drag only selects; 1 = also copy to the clipboard.
+           Ctrl+Shift+C copies either way. */
         c->copy_on_release = cfg_bool(val) ? 1 : 0;
     } else if (!strcmp(key, "repeat_delay")) {
-        /* NextFeature #3: 0 turns K-Term's own repeat off and leaves it to the compositor. */
+        /* 0 turns K-Term's own repeat off and leaves it to the compositor. */
         c->repeat_delay = iclamp_(atoi(val), 0, 5000);
     } else if (!strcmp(key, "repeat_rate")) {
         c->repeat_rate = iclamp_(atoi(val), 1, 200);

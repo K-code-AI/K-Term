@@ -4,7 +4,11 @@
 
 CC      ?= cc
 PKG     := wayland-client wayland-cursor wayland-egl egl gl xkbcommon freetype2 fontconfig harfbuzz
-CFLAGS  ?= -O2 -std=gnu11 -Wall -Wextra
+# The whole tree (src/ and tests/) is warning-free under this set. -Wcast-qual is deliberately NOT
+# enabled: the wayland-scanner-generated xdg-shell bindings in build/generated/ trigger it, and that
+# file is not ours to fix.
+WARN    := -Wall -Wextra -Wshadow -Wwrite-strings -Wformat=2 -Wdiscarded-qualifiers
+CFLAGS  ?= -O2 -std=gnu11 $(WARN)
 CFLAGS  += -D_GNU_SOURCE $(shell pkg-config --cflags $(PKG)) -Iinclude/k-term -Ibuild/generated
 LDLIBS  += $(shell pkg-config --libs $(PKG)) -lm
 

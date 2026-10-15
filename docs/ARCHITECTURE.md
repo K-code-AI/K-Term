@@ -298,8 +298,8 @@ leftover bottom/right strip simply clamps to the last row/column.
 in reading order that cell's LEFT edge (`sel_af/sel_bf = 0`) and the later one its RIGHT edge (`1000`).
 The direction is recomputed on every motion event, so dragging left past the anchor SWAPS the two fracs
 — `term_selection_span` only reorders the pair, it does not mirror them, and without the swap the anchor
-cell would drop out of a leftward selection. Consequence: a highlighted range always covers whole glyphs
-(NextFeature #2), and a press without a drag covers exactly one cell.
+cell would drop out of a leftward selection. Consequence: a highlighted range always covers whole glyphs,
+and a press without a drag covers exactly one cell.
 
 **Which covered cells are painted (vt.c `term_cell_highlightable`).** Being inside the span is not
 enough: pass 2 skips a cell that was never written (`ch == 0`) so a selection dragged past the end of a
@@ -414,7 +414,6 @@ packer's fit check must account for the shelf WRAP (past bug: heap-buffer-overfl
   row), retrying on the next frame` warning means `eglSwapBuffers` returned failure; the frame stays
   dirty and the 8 ms timer retries, so a few of those are self-healing while a long streak means the
   compositor is not showing this window at all.
-* `term_dump()` (src/vt.c) — prints the viewport as text; used by `tests/test_vt.c`.
 * `./bin/dbg` — scripted scroll/resize stages; each stage line prints
   `scroll_off/live_off/rows/rcap/used` plus one two-character token per slot up to
   `used`: first char `v` (viewport slot) or `s` (scrollback slot), second char the row's

@@ -19,7 +19,7 @@ void klog(int level, const char *fmt, ...);
 #define CURSOR_COL  0xffd8d8d8u
 #define SEL_BG      0xff3a4d66u   /* selection highlight background */
 
-/* Default xdg-shell app_id (NextFeature #1). Single-sourced here because config_default(), the
+/* Default xdg-shell app_id. Single-sourced here because config_default(), the
    `app_id =` empty-value fallback in config.c and the last-resort fallback in main.c must all agree;
    three string literals that can drift apart is how a default silently changes. */
 #define DEF_APP_ID  "K-Term"
@@ -177,7 +177,6 @@ void term_init(Term *t, int rows, int cols, int scrollback);
 void term_destroy(Term *t);
 void term_resize(Term *t, int rows, int cols);
 void term_parse(Term *t, const uint8_t *buf, size_t len);
-void term_dump(Term *t, FILE *f);   /* debug: print viewport */
 
 /* selection */
 typedef struct {
@@ -230,13 +229,13 @@ typedef struct Config {
     char working_dir[4096]; /* shell's starting directory; empty => $HOME */
     char app_id[128];       /* xdg-shell app_id the compositor uses to identify/match the window */
     int  clear_scrollback; /* 1 (default): CSI 3 J erases the scrollback buffer */
-    /* NextFeature #2: 1 = releasing the selection drag copies to the clipboard (the old behaviour).
+    /* 1 = releasing the selection drag copies to the clipboard (the old behaviour).
        Default 0: selecting only SELECTS, the user copies with Ctrl+Shift+C. */
     int  copy_on_release;
-    /* NextFeature #3: K-Term drives its own key repeat. repeat_delay = milliseconds a key must be
+    /* K-Term drives its own key repeat. repeat_delay = milliseconds a key must be
        held before it starts repeating (default 300; 0 = leave repeat to the compositor, which is the
-       pre-#3 behaviour and the escape hatch if the timings ever get in the way). repeat_rate =
-       repeats per second once it starts. */
+       behaviour before client-side repeat existed and the escape hatch if the timings ever get in the
+       way). repeat_rate = repeats per second once it starts. */
     int  repeat_delay;
     int  repeat_rate;
     int  loglevel;

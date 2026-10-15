@@ -107,8 +107,7 @@ static const char *fs_src =
     /* Source-over in premultiplied space. The alpha is the ink's coverage PLUS whatever of the
        (translucent) background is still visible under it -- NOT max(a, bg.a): that forced alpha 1 for
        every fragment inside a glyph quad's rectangle, so the bitmap bounding box (the counter of an
-       'o', the margins around a thin glyph) was painted opaque near-black on a transparent window
-       (NextFeature #3). */
+       'o', the margins around a thin glyph) was painted opaque near-black on a transparent window. */
     "    gl_FragColor = vec4(v_fg.rgb * a + bgp * (1.0 - a), a + bg.a * (1.0 - a));\n"
     "}\n";
 
@@ -521,7 +520,7 @@ int render_draw(Render *r, Term *t, Font *f)
     if (sel_on) {
         for (int y = 0; y < g->rows; y++) {
             for (int x = 0; x < g->cols; x++) {
-                /* NextFeature #3: no band over empty space. A cell that was never written (ch == 0)
+                /* No band over empty space. A cell that was never written (ch == 0)
                    has nothing to highlight, so a selection that reaches past the end of a line stops
                    at the last glyph instead of painting the whole window. A real space (' ') and the
                    continuation cell of a wide glyph DO get the band — see term_cell_highlightable. */
@@ -603,7 +602,7 @@ int render_draw(Render *r, Term *t, Font *f)
             col2f(cellbg, bg);
             /* The glyph quad composites the ink over ITS OWN copy of the cell background, so that
                background must carry the window opacity exactly like pass 1's quad does. It used to stay
-               at alpha 1, which is what made every glyph's bounding box opaque (NextFeature #3). */
+               at alpha 1, which is what made every glyph's bounding box opaque. */
             bg[3] *= r->opacity;
 
             float px = x * cw, py = (g->rows - 1 - y) * ch + pad;

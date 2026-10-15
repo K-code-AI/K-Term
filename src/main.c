@@ -98,7 +98,7 @@ static int paste_overflow;                 /* paste bigger than PASTE_BUF_MAX: s
 #define PASTE_BUF_MAX (8u << 20)           /* 8 MiB of clipboard text */
 static int g_ep = -1;                      /* main epoll fd (for adding the paste pipe) */
 
-/* Key repeat (NextFeature #3). A Wayland compositor never synthesizes repeat events the way the X
+/* Key repeat. A Wayland compositor never synthesizes repeat events the way the X
    server does: wl_keyboard.key delivers exactly one press and one release per physical keypress, and
    repeat_info only reports what the user configured system-wide. A client that wants "hold the key and
    it repeats" therefore has to generate the repeats itself. krfd is a CLOCK_MONOTONIC timer that fires
@@ -596,7 +596,7 @@ static void mouse_cell(int *col, int *row)
 }
 
 /* 0-based viewport cell under the pointer.
-   Selection is CELL granular (NextFeature #2): no sub-cell fraction is computed here any more, so an
+   Selection is CELL granular: no sub-cell fraction is computed here any more, so an
    endpoint can never land in the middle of a glyph (see sel_set_endpoints).
    This mapping is exact only because render.c anchors the grid at the window's TOP-LEFT: viewport
    row y occupies window pixels [y*cell_h, (y+1)*cell_h) and column x occupies
@@ -611,7 +611,7 @@ static void sel_cell(int *col, int *row)
 }
 
 /* Set both selection endpoints: the anchor cell and the cell the pointer is on now.
-   Whole glyphs only (NextFeature #2): an endpoint is always a cell EDGE, never a point inside a
+   Whole glyphs only: an endpoint is always a cell EDGE, never a point inside a
    glyph, so a highlighted range always covers complete cells and half a letter cannot be highlighted.
    The endpoint that comes FIRST in reading order gets the cell's LEFT edge (frac 0), the later one its
    RIGHT edge (frac 1000); that is what keeps the cell under the pointer inside the selection whichever
@@ -746,7 +746,7 @@ static void ptr_button(void *d, struct wl_pointer *p, uint32_t serial, uint32_t 
                  term.g.rows, term.g.cols);
         } else {
             W.selecting = 0;
-            /* NextFeature #2: releasing the drag used to ALWAYS offer the selection to the
+            /* Releasing the drag used to ALWAYS offer the selection to the
                clipboard, which meant any stray click-drag overwrote what the user had copied.
                `copy_on_release = 1` restores that; by default the selection just stays visible and
                Ctrl+Shift+C is what copies it. */
@@ -1198,7 +1198,7 @@ static int wayland_setup(int init_w, int init_h)
     xdg_toplevel_add_listener(W.toplevel, &toplevel_listener, NULL);
     /* app_id is what the compositor matches windows on (niri/Sway rules, taskbar grouping, file
        managers' "open terminal here"). Configurable through the config file; config_default() puts
-       DEF_APP_ID ("K-Term", NextFeature #1) there and an empty value is refilled there too, so the
+       DEF_APP_ID ("K-Term") there and an empty value is refilled there too, so the
        fallback here only covers a Config that never went through config_default. */
     xdg_toplevel_set_app_id(W.toplevel, conf.app_id[0] ? conf.app_id : DEF_APP_ID);
     klog(L_INFO, "app_id: %s", conf.app_id[0] ? conf.app_id : DEF_APP_ID);
@@ -1257,7 +1257,7 @@ static void wayland_destroy(void)
 
 /* ---------------- main ---------------- */
 
-/* NextFeature #1: the launch surface is deliberately small. Everything that describes how the
+/* The launch surface is deliberately small. Everything that describes how the
    terminal LOOKS (font, size, grid, colours, opacity) is a persistent preference and lives in the
    config file; the flags that stay are the per-launch ones (what to run, where to start, which config
    to read, debug). The removed flags are still RECOGNISED so the user is told where the setting went
@@ -1439,7 +1439,7 @@ int main(int argc, char **argv)
         epoll_ctl(ep, EPOLL_CTL_ADD, pwfd, &ev);
     }
 
-    /* key repeat (NextFeature #3): idle here, armed per key press by repeat_start() and re-armed at
+    /* key repeat: idle here, armed per key press by repeat_start() and re-armed at
        the configured rate by repeat_fire() */
     krfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
     if (krfd >= 0) {

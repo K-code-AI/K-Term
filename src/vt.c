@@ -765,12 +765,12 @@ int term_selected(Term *t, int col, int row)
 
 /* Should the highlight band actually be PAINTED over cell (col,row)? The caller has already decided
    the cell is inside the selection; this answers "is there anything here to put a highlight on?".
-   Rule (NextFeature #3):
+   Rule:
      - ch == 0            -> nothing was ever written here: NO band, so a selection that runs past the
                              end of a line stops at the last real glyph instead of painting the whole
                              remainder of the window.
-     - ch == ' '          -> a real space produced by an application: band IS painted (the work order
-                             asks for it explicitly, and it is what shows a multi-line selection is
+     - ch == ' '          -> a real space produced by an application: band IS painted (the user asked
+                             for it explicitly, and it is what shows a multi-line selection is
                              still connected across the gap).
      - wide continuation  -> ch == 0 but ATTR_WIDE set: this cell belongs to the glyph in the previous
                              column, so it keeps its band, otherwise the right half of a CJK/emoji
@@ -1311,10 +1311,9 @@ static void csi_dispatch(Term *t, int fin)
     cluster_invalidate(t);   /* any CSI may move the cursor or the rows */
     /* ps->npar is the INDEX of the last parameter (npar == 0 means exactly one
      * parameter); ps->par[k] is already normalized to 0 for omitted/empty params. */
-    int def1 = t->ps.par[0];
+    int def1 = t->ps.par[0];            /* raw first parameter, VT default NOT substituted (ED/EL, DSR) */
     int p1 = t->ps.par[0] ? iclamp_(t->ps.par[0], 0, 65535) : 1;   /* VT default 1 */
     int p2 = t->ps.par[1] ? iclamp_(t->ps.par[1], 0, 65535) : 1;   /* VT default 1 */
-    (void)def1;
 
     /* Queue a response string to be written back to the PTY by main.c. */
     #define TERM_RESP(t_, fmt_, ...) do { \
@@ -1541,15 +1540,16 @@ static void osc_end(Parser *ps)
     Term *t = ps->t;
     ps->osc[ps->osc_len] = 0;
     int cmd = -1;
-    char *s = ps->osc;
-    if (!s[0])
+    char *start = ps->osc;
+    if (!start[0])
         return;
-    char *semi = strchr(s, ';');
+    char *semi = strchr(start, ';');
+    const char *s;                      /* the title text: `start` when there is no numeric prefix */
     if (semi) {
-        cmd = atoi(s);
+        cmd = atoi(start);
         s = semi + 1;
     } else {
-        cmd = atoi(s);
+        cmd = atoi(start);
         s = "";
     }
     if (cmd == 0 || cmd == 1 || cmd == 2) {
@@ -1684,26 +1684,5 @@ void term_parse(Term *t, const uint8_t *buf, size_t len)
             ps->state = PS_GROUND;
             continue;
         }
-    }
-}
-
-/* debug dump of viewport */
-void term_dump(Term *t, FILE *f)
-{
-    for (int y = 0; y < t->g.rows; y++) {
-        Cell *r = grid_vprow(&t->g, y);
-        for (int x = 0; x < t->g.cols; x++) {
-            uint32_t c = r[x].ch;
-            if (!c) {
-                fputc(' ', f);
-            } else if (c < 0x20 || c == 0x7f) {
-                fputc('?', f);
-            } else {
-                char b[4];
-                int n = utf8_encode(c, b);
-                fwrite(b, 1, (size_t)n, f);
-            }
-        }
-        fprintf(f, "|%d\n", y);
     }
 }

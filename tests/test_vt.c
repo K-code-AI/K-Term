@@ -741,7 +741,7 @@ int main(void)
     n = term_selection_text(&T, sel, sizeof(sel));
     CHECK(n == 0 && sel[0] == 0, "empty selection text after clear");
 
-    /* --- per-glyph (cell-granular) endpoints — NextFeature #2 ---------------------------------
+    /* --- per-glyph (cell-granular) endpoints — ------------------------------------------------
        main.c's sel_set_endpoints() only ever produces frac 0 (left edge of the endpoint that comes
        first in reading order) and frac 1000 (right edge of the later one), so a range can never end
        inside a glyph. These checks pin what that means for the user: whole cells only, and the cell
@@ -778,7 +778,7 @@ int main(void)
     n = term_selection_text(&T, sel, sizeof(sel));
     CHECK(n == 1 && sel[0] == 'l', "per-glyph: a press with no drag copies one glyph");
 
-    /* --- no highlight over empty space — NextFeature #3 ---------------------------------------
+    /* --- no highlight over empty space — ------------------------------------------------------
        term_cell_highlightable() decides whether the band is PAINTED over a covered cell; the copied
        text is deliberately unaffected (blank cells are still spaces, trailing ones trimmed). */
     term_destroy(&T);
@@ -978,11 +978,11 @@ int main(void)
     CHECK(T.g.row[T.g.rows][0].ch == 0, "the slots below the viewport are blanked");
     {
         int bad = 0;
-        for (int a = 0; a < T.g.rcap; a++) {
-            if (!T.g.row[a])
+        for (int s1 = 0; s1 < T.g.rcap; s1++) {
+            if (!T.g.row[s1])
                 bad++;
-            for (int b = a + 1; b < T.g.rcap; b++)
-                if (T.g.row[a] == T.g.row[b])
+            for (int s2 = s1 + 1; s2 < T.g.rcap; s2++)
+                if (T.g.row[s1] == T.g.row[s2])
                     bad++;
         }
         CHECK(bad == 0, "ED 3 keeps row[] a valid permutation");
@@ -1023,10 +1023,10 @@ int main(void)
         char pb[64];
         const char *txt = "echo \"foo\"\r\necho \"bar\"\r\n";
         size_t tlen = strlen(txt);
-        int n = paste_wrap(0, txt, tlen, pb, sizeof(pb));
-        CHECK(n == (int)tlen && !memcmp(pb, txt, tlen), "paste_wrap off = raw bytes");
-        n = paste_wrap(1, txt, tlen, pb, sizeof(pb));
-        CHECK(n == (int)tlen + 12, "paste_wrap on adds the two 6-byte delimiters");
+        int wlen = paste_wrap(0, txt, tlen, pb, sizeof(pb));
+        CHECK(wlen == (int)tlen && !memcmp(pb, txt, tlen), "paste_wrap off = raw bytes");
+        wlen = paste_wrap(1, txt, tlen, pb, sizeof(pb));
+        CHECK(wlen == (int)tlen + 12, "paste_wrap on adds the two 6-byte delimiters");
         CHECK(!memcmp(pb, "\x1b[200~", 6), "paste starts with ESC[200~");
         CHECK(!memcmp(pb + 6, txt, tlen), "the whole block stays inside the brackets");
         CHECK(!memcmp(pb + 6 + tlen, "\x1b[201~", 6), "paste ends with ESC[201~");
@@ -1057,7 +1057,7 @@ int main(void)
         term_destroy(&lt);
     }
 
-    /* --- config: the app_id is configurable (NextFeature #1/#2) --------------------------------
+    /* --- config: the app_id is configurable ---------------------------------------------------
        config.c is linked into this binary, so the file format itself is testable here. The expected
        default is DEF_APP_ID (k-term.h), the same macro config_default() and main.c use. */
     {
@@ -1088,7 +1088,7 @@ int main(void)
         }
     }
 
-    /* --- config: the copy_on_release toggle (NextFeature #2) ----------------------------------
+    /* --- config: the copy_on_release toggle ---------------------------------------------------
        Default OFF: releasing a selection drag must not touch the clipboard (Ctrl+Shift+C does).
        One cfg_bool() parser now backs both this and clear_scrollback, so both are checked. */
     {
@@ -1126,7 +1126,7 @@ int main(void)
         }
     }
 
-    /* --- config: the key-repeat settings (NextFeature #3) --------------------------------------
+    /* --- config: the key-repeat settings ------------------------------------------------------
        A Wayland compositor never sends repeat events, so K-Term generates them itself and both
        numbers are its own: repeat_delay (ms before the first repeat, 0 = off) and repeat_rate
        (repeats per second afterwards). Both are clamped so a typo cannot stall or flood the PTY. */
@@ -1193,9 +1193,9 @@ int main(void)
         CHECK(T.g.scroll_off + T.g.rows <= T.g.rcap, "grow: scrolling keeps used <= rcap");
         CHECK(T.g.live_off <= T.g.rcap - T.g.rows, "grow: live_off stays inside the grid");
         CHECK(T.g.live_off == T.g.scroll_off, "grow: printing keeps the view at the live anchor");
-        char row[64];
-        row_text(T.g.rows - 1, row);
-        CHECK(strstr(row, "NEWEST") != NULL, "grow: the newest line is on screen");
+        char linebuf[64];
+        row_text(T.g.rows - 1, linebuf);
+        CHECK(strstr(linebuf, "NEWEST") != NULL, "grow: the newest line is on screen");
         CHECK(content_rows() == T.g.rcap, "grow: every slot holds content once the scrollback fills");
         feed("\x1b[1T");                     /* scroll down: must stay inside the grid */
         CHECK(T.g.scroll_off + T.g.rows <= T.g.rcap, "grow: scroll-down stays inside the grid");
@@ -1209,8 +1209,8 @@ int main(void)
         CHECK(T.g.scroll_off + T.g.rows <= T.g.rcap, "shrink after grow: used <= rcap");
         CHECK(T.g.live_off <= T.g.scrollback_max && T.g.live_off <= T.g.rcap - T.g.rows,
               "shrink after grow: live_off within both bounds");
-        row_text(T.g.rows - 1, row);
-        CHECK(strstr(row, "LAST") != NULL, "shrink after grow: the newest line is on screen");
+        row_text(T.g.rows - 1, linebuf);
+        CHECK(strstr(linebuf, "LAST") != NULL, "shrink after grow: the newest line is on screen");
     }
 
     term_destroy(&T);

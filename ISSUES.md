@@ -60,6 +60,11 @@ Not bugs — current behaviour the user has to know about. (Root causes of actua
   `wl_data_offer_accept()` before `wl_data_offer_receive()` — niri tolerates it (measured: `wl-copy` text
   reaches K-Term and lands in the PTY byte-for-byte), but the protocol says a receiver should accept a
   type first, so that is the first thing to check if pasting from another application ever breaks.
+* **The window title is always `K-Term`.** OSC 0/2 title sequences are parsed and stored
+  (`Term.title` in src/vt.c, covered by a `tests/test_vt.c` check), but `src/main.c` calls
+  `xdg_toplevel_set_title()` once with the literal `"K-Term"` and never pushes `Term.title` to the
+  compositor, so a shell or application that sets its own title has no visible effect. Nothing is broken
+  by it — it is simply not wired up.
 * **A clipboard paste larger than `PASTE_BUF_MAX` (8 MiB) is sent unwrapped** — no `ESC[200~` /
   `ESC[201~` delimiters — with a warning in the log, because the whole block has to be buffered before
   the delimiters can surround it.
