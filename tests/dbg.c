@@ -155,6 +155,34 @@ int main(void){
     chk("growthen-shrink");
     for (int i = 1; i <= 40; i++) { char l[32]; snprintf(l, sizeof l, "H%02d\r\n", i); feed(l); }
     chk("growthen-scroll2");
+    /* SHRINK with a cursor to preserve (the zoom leftover-lines bug, ISSUES.md #4). The viewport now
+       gives up its BOTTOM rows while the cursor has rows below it, which blanks a slot IN PLACE
+       instead of sliding the window down one slot — a different code path than the old top-row-into-
+       scrollback one, so row[] must be re-checked as a NULL-free, duplicate-free permutation for
+       both, plus the alternate screen (grid_resize_plain gets the cursor slot) and a whole zoom sweep
+       where cols AND rows change together. */
+    term_destroy(&T);
+    term_init(&T, 6, 20, 6);                 /* rcap = 12 */
+    for (int i = 1; i <= 4; i++) { char l[32]; snprintf(l, sizeof l, "Z%02d\r\n", i); feed(l); }
+    feed("\x1b[3;1H");                       /* cursor on viewport row 2, text BELOW it */
+    chk("zoom-before");
+    term_resize(&T, 3, 9);   chk("zoom-bottom");        /* 3 rows given up from the bottom */
+    term_resize(&T, 8, 26);  chk("zoom-back");
+    term_resize(&T, 2, 5);   chk("zoom-past-cursor");   /* now the TOP rows go to scrollback */
+    term_resize(&T, 6, 20);  chk("zoom-back2");
+    for (int cyc = 0; cyc < 3; cyc++) {                 /* a whole zoom sweep */
+        term_resize(&T, 4, 11);
+        term_resize(&T, 9, 31);
+    }
+    chk("zoom-sweep");
+    feed("after");
+    chk("zoom-after");
+    feed("\x1b[?1049h");                                 /* alternate screen: no reflow, same rule */
+    for (int i = 1; i <= 5; i++) { char l[32]; snprintf(l, sizeof l, "A%02d\r\n", i); feed(l); }
+    term_resize(&T, 3, 10);  chk("alt-shrink");
+    term_resize(&T, 9, 30);  chk("alt-grow");
+    feed("\x1b[?1049l");
+    chk("alt-exit");
     term_destroy(&T);
     printf("%s (%d problems)\n", problems ? "MODEL FAIL" : "MODEL OK", problems);
     return problems ? 1 : 0;

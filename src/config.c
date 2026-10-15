@@ -48,6 +48,9 @@ void config_default(Config *c)
     c->copy_on_release = 0;    /* selecting does not copy unless the user asks (Ctrl+Shift+C does) */
     c->repeat_delay = 300;     /* ms before a held key repeats (0 = K-Term does not repeat) */
     c->repeat_rate = 30;       /* repeats per second once repeating */
+    /* A few pixels of margin on every side. Compositors round the window corners (niri does), and with
+       the grid flush against the edge the corner glyphs get clipped. 0 restores the old layout. */
+    c->padding = 8;
     c->loglevel = L_WARN;
 }
 
@@ -130,6 +133,11 @@ static void apply(Config *c, const char *key, char *val)
         c->repeat_delay = iclamp_(atoi(val), 0, 5000);
     } else if (!strcmp(key, "repeat_rate")) {
         c->repeat_rate = iclamp_(atoi(val), 1, 200);
+    } else if (!strcmp(key, "padding")) {
+        /* px of margin around the whole grid, applied on all four sides (0 = flush with the window
+           edge). The clamp keeps a huge value from shrinking the terminal away: term_grid_geometry()
+           additionally caps the margin so at least one whole cell always fits. */
+        c->padding = iclamp_(atoi(val), 0, 128);
     } else if (!strcmp(key, "log")) {
         c->loglevel = iclamp_(atoi(val), L_ERROR, L_DEBUG);
     } else {

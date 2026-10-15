@@ -48,9 +48,15 @@ bin/test_vt: tests/test_vt.c build/vt.o build/config.o | bin
 bin/dbg: tests/dbg.c build/vt.o build/config.o | bin
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-test: bin/test_vt bin/dbg
+test: bin/test_vt bin/dbg test-cli
 	./bin/test_vt
 	./bin/dbg
+
+# The option parser lives in main() in src/main.c, which is not linked into bin/test_vt, so the
+# command-line surface can only be checked by running the real binary. tests/cli_test.sh does exactly
+# that (it skips the window-opening checks when there is no Wayland session).
+test-cli: $(BIN)
+	sh tests/cli_test.sh ./$(BIN)
 
 # address-sanitizer builds of the VT unit tests (make asan)
 ASANFLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer -g
@@ -74,4 +80,4 @@ run: $(BIN)
 clean:
 	rm -rf bin build
 
-.PHONY: all test asan run clean
+.PHONY: all test test-cli asan run clean

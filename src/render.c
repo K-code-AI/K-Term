@@ -214,7 +214,22 @@ static void setup_gl(Render *r)
         klog(L_INFO, "instancing unavailable; using per-vertex expansion");
 }
 
-int render_init(Render *r, void *wl_display, void *egl_window, int w, int h, float opacity)
+/* Clear colour = the configured background, premultiplied by the window opacity. A Wayland EGL ARGB
+   buffer is premultiplied (the compositor computes surface_rgb + (1-surface_a)*backdrop), so the
+   colour channels must already carry the alpha — the same rule the fragment shader follows. Used by
+   render_init once and by render_draw every frame: the Config.padding margin and the whole-cell
+   remainder at the bottom/right are never covered by a quad, and a resized buffer has no defined
+   contents at all. */
+static void set_clear_color(Render *r)
+{
+    float a = r->opacity;
+    glClearColor(((r->bg >> 16) & 0xff) / 255.0f * a,
+                 ((r->bg >> 8) & 0xff) / 255.0f * a,
+                 (r->bg & 0xff) / 255.0f * a, a);
+}
+
+int render_init(Render *r, void *wl_display, void *egl_window, int w, int h, float opacity,
+                uint32_t bg)
 {
     memset(r, 0, sizeof(*r));
     r->vw = w;
@@ -302,6 +317,7 @@ int render_init(Render *r, void *wl_display, void *egl_window, int w, int h, flo
     r->ectx = ctx;
     r->nwin = egl_window;
     r->opacity = fclamp_(opacity, 0.0f, 1.0f);
+    r->bg = bg;
     r->ecfg = malloc(sizeof(cfg));
     if (r->ecfg)
         memcpy(r->ecfg, &cfg, sizeof(cfg));
@@ -314,14 +330,12 @@ int render_init(Render *r, void *wl_display, void *egl_window, int w, int h, flo
         return -1;
     setup_gl(r);
 
-    float bg_r, bg_g, bg_b;
-    bg_r = ((DEF_BG >> 16) & 0xff) / 255.0f;
-    bg_g = ((DEF_BG >> 8) & 0xff) / 255.0f;
-    bg_b = (DEF_BG & 0xff) / 255.0f;
-    /* The buffer is premultiplied, so the clear colour must be too: the leftover pixels at the
-       bottom/right of the window (a window size that is not an exact multiple of the cell) then blend
-       exactly like the cell backgrounds render_draw paints. */
-    glClearColor(bg_r * opacity, bg_g * opacity, bg_b * opacity, opacity);
+    /* The buffer must start out as the configured background, not as DEF_BG: with Config.padding the
+       margin around the grid is only ever painted by the clear, so a hardcoded DEF_BG showed up as a
+       differently-coloured frame whenever `background` was set (measured: a `background = 0a0a2e`
+       window had a 20 px (16,16,20) band on all four sides). Same premultiplication rule as the cell
+       quads — see the comment in render_draw. */
+    set_clear_color(r);
     glClear(GL_COLOR_BUFFER_BIT);
     /* Do NOT swap here: attaching a buffer before the first xdg_surface.configure is
        acked is a Wayland protocol error. The first eglSwapBuffers happens in render_draw. */
@@ -455,15 +469,19 @@ int render_draw(Render *r, Term *t, Font *f)
     if (sel_on)
         term_selection_span(t, &selspan);
 
-    /* The grid is anchored at the TOP-LEFT of the window: viewport row y occupies window pixels
-       [y*ch, (y+1)*ch) and column x occupies [x*cw, (x+1)*cw). main.c maps the pointer with
-       row = ptr_y / cell_h, col = ptr_x / cell_w, which is only exact when the grid starts at window
-       (0,0). The leftover pixels (cur_h - rows*cell_h, non-zero after almost every compositor
-       configure: e.g. 10 px on a 16 px cell) therefore belong at the BOTTOM/right of the window and
-       never at the top/left. Anchoring at the bottom-left instead put them at the top, so
-       floor(ptr_y/cell_h) named the row BELOW the pointer for most of each row's height -- the
-       selection (and SGR mouse reporting) landed on the wrong line. */
-    float pad = (float)r->vh - (float)g->rows * ch;
+    /* The grid is anchored at (gx, gy) in window pixels — the Config.padding margin, handed over by
+       main.c through render_set_origin() from the SAME term_grid_geometry() call that chose cols/rows
+       and that main.c uses to map the pointer (row = (ptr_y - gy)/cell_h, col = (ptr_x - gx)/cell_w).
+       Viewport row y therefore occupies window pixels [gy + y*ch, gy + (y+1)*ch) and column x occupies
+       [gx + x*cw, gx + (x+1)*cw). The pixels left over after whole cells (cur_h - 2*gy - rows*ch, non-zero
+       after almost every compositor configure: e.g. 10 px on a 16 px cell) belong at the BOTTOM/RIGHT,
+       never at the top/left — putting them there instead made floor((ptr_y - gy)/cell_h) name the row
+       BELOW the pointer for most of each row's height, so the selection (and SGR mouse reporting)
+       landed on the wrong line. gy == gx == 0 is the old edge-to-edge layout. */
+    float grid_x = (float)r->gx;   /* NOT named gx: the color-emoji branch below has a local gx */
+    /* GL y grows upward while window y grows downward, so the grid's top edge sits at GL y =
+       vh - gy - rows*ch above the bottom of the buffer: the configured margin plus the remainder. */
+    float pad = (float)r->vh - (float)r->gy - (float)g->rows * ch;
     if (pad < 0.0f)
         pad = 0.0f;
 
@@ -507,7 +525,7 @@ int render_draw(Render *r, Term *t, Font *f)
             }
             col2f(cellbg, bg);
             bg[3] *= r->opacity;
-            float px = x * cw, py = (g->rows - 1 - y) * ch + pad;   /* GL y up, grid top-left aligned */
+            float px = grid_x + x * cw, py = (g->rows - 1 - y) * ch + pad;   /* GL y up, grid at (gx,gy) */
             emit_quad(&vp, px, py, cw, ch, du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f,
                       white, bg, 0.0f, 0.0f, 0.0f);
             nquads++;
@@ -531,7 +549,7 @@ int render_draw(Render *r, Term *t, Font *f)
                 if (hlw <= 0.0f)
                     continue;
                 float py = (g->rows - 1 - y) * ch + pad;
-                emit_quad(&vp, hl0, py, hlw, ch,
+                emit_quad(&vp, grid_x + hl0, py, hlw, ch,
                           du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f,
                           white, selc, 0.0f, 0.0f, 0.0f);
                 nquads++;
@@ -585,8 +603,10 @@ int render_draw(Render *r, Term *t, Font *f)
                 sel_band_pixels(&selspan, g->cols, x, y, cw, &hl0, &hlw);
                 hl_on = hlw > 0.0f;
             }
-            float band0 = hl_on ? hl0 : 0.0f;
-            float band1 = hl_on ? hl0 + hlw : 0.0f;
+            /* The shader compares the fragment's ABSOLUTE buffer pixel x with the band edges, so the
+               band must carry the grid origin exactly like the quad origin below does. */
+            float band0 = hl_on ? grid_x + hl0 : 0.0f;
+            float band1 = hl_on ? grid_x + hl0 + hlw : 0.0f;
             int is_cursor = t->show_cursor && g->scroll_off == g->live_off &&
                             x == t->cx && y == t->cy;
             if (is_cursor) {
@@ -605,7 +625,7 @@ int render_draw(Render *r, Term *t, Font *f)
                at alpha 1, which is what made every glyph's bounding box opaque. */
             bg[3] *= r->opacity;
 
-            float px = x * cw, py = (g->rows - 1 - y) * ch + pad;
+            float px = grid_x + x * cw, py = (g->rows - 1 - y) * ch + pad;
 
             if (cg) {
                 /* The color bitmap carries UNSCALED strike metrics (128px strike on this box),
@@ -703,6 +723,10 @@ int render_draw(Render *r, Term *t, Font *f)
     }
 
     glViewport(0, 0, r->vw, r->vh);
+    /* Clear every frame: the padding margin and the whole-cell remainder are outside every quad, so
+       nothing else writes them, and after a resize the new back buffer has no defined contents. */
+    set_clear_color(r);
+    glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(r->prog);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, f->atlas_tex);
@@ -754,6 +778,14 @@ int render_draw(Render *r, Term *t, Font *f)
         return 0;
     }
     return 1;
+}
+
+void render_set_origin(Render *r, int gx, int gy)
+{
+    /* Only legal together with the grid size it was computed for — main.c sets both in
+       term_size_changed(), before any draw. */
+    r->gx = gx < 0 ? 0 : gx;
+    r->gy = gy < 0 ? 0 : gy;
 }
 
 void render_resize(Render *r, int w, int h)

@@ -10,19 +10,28 @@ K-Term is a lightweight Linux terminal emulator for Wayland written in C: native
 (xdg-shell) + PTY shell + VT/ANSI parser + EGL/OpenGL text rendering from two glyph atlases (alpha8
 mono + RGBA8 color emoji) in one draw call per frame. No GUI framework.
 
-## Current Status (build/test/asan/live re-verified 2026-10-15, session 51)
+## Current Status (build/test/asan re-verified 2026-10-15, session 55)
 - Clean tree: `make` -> zero warnings under the Makefile's `WARN` set (`-Wall -Wextra -Wshadow
   -Wwrite-strings -Wformat=2 -Wdiscarded-qualifiers`, tightened in session 50; the tree is also clean
   under `-Wcast-qual -Wmissing-prototypes -Wstrict-prototypes -Wold-style-definition -Wredundant-decls`
   except inside the generated xdg-shell bindings, which is why `-Wcast-qual` is not in `WARN`);
-  `make test` -> `323 checks, 0 failures` +
-  `MODEL OK (0 problems)`; `make asan` -> same, with NO LeakSanitizer/UBSan report. No temporary probe or
-  experiment remains in the tree (`grep -rn "TEMPORARY|PROBE|EXPERIMENT|KTERM_S47" src/ include/ tests/`
-  -> nothing). Re-run from a clean tree by session 51 (`make clean && make` 0 warnings, `make test`,
-  `make asan`, a live `-d` run and a 31-check CLI harness — `/tmp/s51_build.log`, `/tmp/s51_test.log`,
-  `/tmp/s51_asan.log`, `/tmp/s51_live.log`, `/tmp/s51_cli.sh`); README's flags table (`-e -w -c -d -v -h`,
-  the config flag became lower-case `-c` in session 51) and its 17 settings rows match `src/main.c` and
+  `make test` -> `364 checks, 0 failures` + `MODEL OK (0 problems)` + `CLI: 77 checks, 0 failures, 0
+  skipped`; `make asan` -> `364 checks, 0 failures` + `MODEL OK`, with NO LeakSanitizer/UBSan report.
+  No temporary probe or experiment remains in the tree (`grep -rnE "TEMPORARY|PROBE|EXPERIMENT|NEGATIVE"
+  src/ include/ tests/` -> nothing). Re-run from a clean tree by session 55 (`make clean && make` 0
+  warnings `/tmp/s55_build.log`, `make test` `/tmp/s55_test.log`, `make asan` `/tmp/s55_asan.log`);
+  README's flags table (`-e -w -c -d -v -h`) and its 18 settings rows match `src/main.c` and
   `src/config.c`.
+- **Zoom no longer leaves stale prompt lines — CONFIRMED BY THE USER** (session 54: "Zoom is fixed and
+  now works as expected"). Root cause + evidence: ISSUES.md "Fixed: Zooming in and out left stale prompt
+  lines and uneven gaps". 23 checks in tests/test_vt.c + `zoom-*`/`alt-*` stages in tests/dbg.c; the
+  negative test (those checks against the pre-fix vt.c) gives 16 failures.
+- **Window padding (`padding` config key, default 8 px) — CONFIRMED BY THE USER** (session 55: "I confirm
+  the padding to be working properly in K-Term"). One helper, `term_grid_geometry()`, decides cols/rows
+  AND the grid origin, and is used by the grid/PTY size, the pointer -> cell mapping and the renderer, so
+  the margin, the click mapping and the quads cannot drift apart. Its follow-up — the margin being cleared
+  with `DEF_BG` instead of the configured `background` — is FIXED (Render.bg + `set_clear_color()` + a
+  per-frame `glClear`) and is now in ISSUES.md "Fixed", not "Open".
 - **The user-reported black window / no input is FIXED and verified live** (session 47; re-verified live
   by session 48, including a wf-recorder frame diff). Root cause and
   evidence: ISSUES.md "Fixed: Black window, no prompt, no input". Short version: `eglSwapBuffers` was
@@ -63,13 +72,36 @@ mono + RGBA8 color emoji) in one draw call per frame. No GUI framework.
   scrollback than configured (`rcap` is fixed at startup). All three are in ISSUES.md "Known limitations".
 
 ## Current Task
-NONE OPEN (session 51 done — the user's CLI change is implemented, verified and pushed).
+DONE (session 55) — documentation accuracy pass + commit, at the user's request ("Cleanup + commit").
+What was stale and is now corrected: the padding clear-colour item sat in ISSUES.md "Open" as NOT
+VERIFIED although the user had confirmed padding works in their real window; the CLI-coverage item was
+still listed as "Fix in progress" although `tests/cli_test.sh` + `make test-cli` are in the tree and
+running; ISSUES.md/ARCHITECTURE still quoted 323 checks; ARCHITECTURE's `-d` line list omitted the
+`padding` field that `grid resized` now prints; ARCHITECTURE's Modules table had no `tests/cli_test.sh`
+row; README's target table did not mention `test-cli`; and this journal had NO Progress entry for the
+session-54 padding work even though Current Status pointed at one (written now, reconstructed from the
+diff, not from memory).
 
-NEXT ACTION: ask the user what to build next; do not start a feature without their go-ahead. Two things
-worth offering (both options, not open bugs):
-  * a `k-term` ASan target (only the tests have one; the hand-built one found the `row[rcap]` overrun);
-  * the `wl_data_offer_accept()` + multi-mime clipboard hardening, which niri does not need but a stricter
-    compositor might (ISSUES.md "Known limitations").
+DONE (session 54, CONFIRMED BY THE USER in session 55) — the zoom bug: it is in ISSUES.md "Fixed".
+Verified here: the grid fix (src/vt.c + the k-term.h prototype), 23 regression checks in tests/test_vt.c,
+the `zoom-*`/`alt-*` stages in tests/dbg.c, and the negative test (those checks against the PRE-FIX vt.c)
+-> 16 failures, all of them the zoom checks. `make asan` re-run in session 55: clean.
+
+DONE (session 54, CONFIRMED BY THE USER: "I confirm the padding to be working properly in K-Term") —
+window padding, and with it the `DEF_BG` clear-colour follow-up, which moved from ISSUES.md Open #4 to
+"Fixed" in session 55. The user also ruled that the blank-cell colour I found while measuring is NOT a
+defect ("working as intended") — do not re-open it.
+
+OPEN WORK (the only two real bugs left, both user-reported, both in ISSUES.md "Open"):
+* **#1:** launching `k-term` while ANOTHER k-term is still running prints `atlas glTexImage2D failed:
+  0x505 (512x512)` and then `SIGSEGV`; with no leftover process it starts fine twice in a row. Not
+  reproduced here yet.
+* **#2:** on launch, `eglSwapBuffers failed: 0x3000` + `swap failed (1 in a row), retrying on the next
+  frame`; no visible effect, the retry works. Reproduce, explain, fix if it is a real defect rather than
+  a benign first-frame race.
+
+PREVIOUS TASK (session 51) — DONE: `-C` -> `-c`, retired-flag messaging deleted, one generic unknown-option
+message; committed and pushed as `b451d87`.
 
 ### Progress (Instruction.md order: oldest first, newest last)
 - 2026-10-14 (sessions 33-37, CONDENSED — the durable facts live elsewhere now): session 33 audited
@@ -502,8 +534,202 @@ worth offering (both options, not open bugs):
   "the config flag is `-c` since session 51" so its historical `-C <conf>` command is not misread.
   NEXT ACTION: nothing open — ask the user what to build next.
 
+- 2026-10-15 (session 52, fix list #0/#1/#2 from the user). Recorded all three in ISSUES.md "Open" as
+  #0 (no CLI coverage), #1 (second instance: `atlas glTexImage2D failed: 0x505` + SIGSEGV), #2
+  (`eglSwapBuffers failed: 0x3000` on launch); the old LeakSanitizer item is now Open #3.
+  DONE (#0): `tests/cli_test.sh` (POSIX sh, checked in) + a `test-cli` Makefile target that depends on
+  `$(BIN)` and runs `sh tests/cli_test.sh ./bin/k-term`; `test` now depends on `test-cli`, so `make test`
+  covers the flags too. The script drives the REAL binary (argv cannot be unit-tested: main.c is not
+  linked into bin/test_vt), wraps every launch in `timeout -k 2 15` so a hang cannot wedge the suite,
+  cleans its temp dir with a trap, and skips the window-opening checks with a printed SKIP when
+  WAYLAND_DISPLAY is unset. Coverage: -h/--help identical + all six options listed + no `-C`; -v/--version;
+  `-C -f -s -r -o -x --bogus` each rejected with the identical generic first line + usage + exit 1 + no
+  "any more" text + nothing on stdout; -e/-w/-c and their long forms with a missing argument (the message
+  echoes the flag exactly as typed — that is the real behaviour, my first expectation was wrong); -c FILE /
+  --config FILE / --config=FILE really load the file (app_id + font_size 30 -> cell 18x34); -d beats
+  `log = 0` in the file and without -d the file's level is kept; -w DIR logs `shell starts in DIR`;
+  -e COMMAND ends by itself (`pty closed` or `child exited`) and logs `k-term exiting`; all flags combined.
+  RESULT: `make test-cli` -> `CLI: 77 checks, 0 failures, 0 skipped`.
+  PROVED THE SUITE ACTUALLY TESTS SOMETHING (negative test): temporarily reverted `-c` to `-C` in the
+  parser AND re-added a `-o`-specific "not a command-line option any more" message -> 15 failures naming
+  the help listing, the `-C` rejection, the `-o` message and every config-flag behaviour; then
+  `git checkout -- src/main.c`, rebuilt, back to 77/0.
+  NEXT ACTION: #1 — reproduce the second-instance crash (`atlas glTexImage2D failed: 0x505 (512x512)` +
+  SIGSEGV when another k-term is left running).
+
+- 2026-10-15 (session 53, NEW user bug #4 — zoom leaves stale prompt lines and uneven gaps; ROOT
+  CAUSE FOUND AND FIXED IN THE GRID, verification in progress). REPORT: after a few Ctrl+- / Ctrl+=
+  zooms the prompt spacing drifts apart and old prompt lines stay on screen; the user supplied a
+  kitty screenshot as the reference (packed, consistent).
+  REPRODUCED HEADLESS — no display, no key injection needed. `.scratch/s53/pty_zoom.c` runs the REAL
+  fish in a REAL PTY (src/pty.c) through the REAL grid model (src/vt.c), feeds the PTY output to
+  `term_parse`, hands `Term.resp` back to the PTY exactly as main.c does (without that fish stalls in
+  its startup capability queries and prints nothing — my first two attempts showed an empty grid for
+  that reason, one of them because `tv_sec*1000` overflowed an `int` in my own harness), then applies
+  zoom-shaped resizes (cols AND rows change together, as `zoom_apply`/`term_size_changed` do). Before
+  the fix: one shrink 50 -> 41 rows put the prompt at slots 1-2 in SCROLLBACK and fish's SIGWINCH
+  repaint at 10-11 (8 blank rows between); after three zoom cycles: three prompts, two gaps. That is
+  the user's screenshot, byte for byte. `.scratch/s53/cursor_repro.c` isolates the mechanism: the
+  cursor's absolute row[] slot goes 2 -> 9 across one shrink (it leaves its own line), and 9 stays 9
+  across the following grow, so the cursor drifts down ~7 rows per zoom step.
+  ROOT CAUSE: `grid_resize_rows()`'s shrink loop always gave up the viewport's TOP row (it becomes the
+  newest scrollback line). When the viewport shrinks by MORE rows than the cursor has rows above it —
+  the normal case at a prompt, where everything below the cursor is blank — the cursor's own line was
+  pushed into scrollback, and `term_resize()` then clamped `t->cy` to 0. The shell repaints its prompt
+  at that clamped cursor, so every zoom step adds a fresh copy of the prompt and leaves the old one.
+  NOT a renderer bug, NOT reflow, NOT the zoom code itself: `zoom_apply` and `term_size_changed` were
+  read and are fine; a pure grid test with hard-broken lines (`.scratch/s53/zoom_repro.c`) showed the
+  reflow itself keeps rows 1:1.
+  FIX (src/vt.c + the k-term.h prototype): `grid_resize_rows(Grid *g, int rows, int cur_slot)` — the
+  shrink now gives up the viewport's BOTTOM row (blanked, becomes a free slot) while the cursor still
+  has rows below it, and only after that falls back to the old top-row-into-scrollback behaviour (which
+  keeps the newest content and moves the cursor's viewport row with it). `grid_resize` passes the
+  cursor slot AFTER `grid_reflow` has moved it; `grid_resize_plain` gained a `cur_slot` argument so the
+  alternate screen keeps the same rule (vim/htop cursor), and `term_resize` passes it. -1 = no cursor
+  to preserve = the old behaviour (that is what tests/dbg.c uses).
+  VERIFIED SO FAR: `make` 0 warnings; the isolated repro now keeps the cursor at slot 2 / cy 2 through
+  shrink AND grow; the fish harness now shows exactly ONE prompt at slots 1-2 with cursor cy=2 after
+  all six zoom steps (was three prompts and two gaps); `make test` -> `323 checks, 0 failures` +
+  `MODEL OK (0 problems)` + `CLI: 77 checks, 0 failures, 0 skipped` (unchanged — no new test yet).
+  NEXT ACTION: add regression checks to tests/test_vt.c (cursor slot preserved across a shrink that
+  removes more rows than the cursor has above it; content below the cursor dropped, not scrolled; a
+  full viewport still scrolls into scrollback) and a tests/dbg.c stage for the row[] permutation
+  invariant; then `make test`/`make asan`/a live zoom run, then docs.
+
+- 2026-10-15 (session 54, RESUMED session 53's zoom fix — tests finished and negative-tested; asan and
+  the live run still to do). STATE AS FOUND (re-measured rather than trusted from the journal): the grid
+  fix was already in `src/vt.c` + the `k-term.h` prototype, and 23 regression checks were already in
+  `tests/test_vt.c` (its mtime is newer than vt.c) — but the journal still said "no new test yet", so the
+  first job was to re-verify, not re-implement. `make clean && make` exit 0 / 0 warnings
+  (/tmp/s54_build.log); `make test` -> `346 checks, 0 failures` + `MODEL OK (0 problems)` + `CLI: 77
+  checks, 0 failures, 0 skipped` (/tmp/s54_test.log). 323 -> 346: session 53's NEXT ACTION had in fact
+  been carried out before the interruption.
+  DONE (the missing test piece): `tests/dbg.c` gained the `zoom-*` / `alt-*` stages after
+  `growthen-scroll2`. A cursor-aware shrink is a NEW code path (the freed bottom slot is blanked IN
+  PLACE instead of the window sliding down one slot), so `row[]` must stay a NULL-free, duplicate-free
+  permutation and the anchors in bounds for: cursor mid-text with rows below it (`zoom-bottom`, nothing
+  enters scrollback), a shrink past the cursor (`zoom-past-cursor`, the top rows then DO go to
+  scrollback: `scroll_off=1 live_off=1 rows=2 used=3`), growing back, a 3-cycle zoom sweep where cols
+  AND rows change together (`zoom-sweep`), and the alternate screen, which gets the cursor slot through
+  `grid_resize_plain` (`alt-shrink`/`alt-grow`/`alt-exit`). `make test` -> `346 checks, 0 failures` +
+  `MODEL OK (0 problems)` (/tmp/s54_test2.log). NOTE: `chk()` validates only the permutation/anchor
+  invariants, so these stages prove the new path does not BREAK them — they do NOT fail against the
+  pre-fix code; the content/cursor assertions that pin the fix are the test_vt.c ones.
+  NEGATIVE TEST (proves the 23 new checks are not vacuous): built the NEW tests/test_vt.c against the
+  PRE-FIX sources (`git show HEAD:src/vt.c` + `HEAD:include/k-term/k-term.h` into /tmp/s54_neg/, one
+  `cc` line) -> `346 checks, 16 failures`, and the 16 are exactly the new zoom checks ("shrink keeps the
+  cursor on its own row[] slot", "zoom cycles keep the cursor slot", "alt screen keeps the cursor's line
+  visible", …). Against the fixed vt.c: 0 failures.
+  MY OWN MISTAKE THIS SESSION, recorded because it damaged this file: a python one-liner meant only to
+  REORDER the Progress entries (sessions 52/53 sat at the top, which contradicts the "oldest first,
+  newest last" header) reused index ranges captured BEFORE the deletions, so it deleted the 52/53
+  entries and pasted a garbage slice (part of a session-43 entry + Environment bullets) in front of
+  "## Next Steps". REPAIRED by deleting that inserted block and re-writing the 52/53 entries from the
+  copy of this file read at the start of the session, then re-checking the whole file against
+  `git show HEAD:AGENT.md` (`diff -u` shows only the intended changes: the Current Task rewrite and the
+  three new Progress entries in chronological order). PITFALL for the next agent: never splice a text
+  file with indices captured before an earlier splice in the same script — re-find the anchors after
+  every mutation, and diff against git afterwards.
+  NEXT ACTION: `make asan`; then the live check in the real window (inject `Ctrl+-`/`Ctrl+=` several
+  times with `.scratch/inject` and read K-Term's own `grid resized` log lines, plus re-run
+  `.scratch/s53/pty_zoom.c` as the headless ground truth); then docs (ISSUES.md #4 Open -> Fixed only
+  after that evidence or the user's confirmation) and commit + push.
+
+- 2026-10-15 (session 54, WINDOW PADDING — the user's request, CONFIRMED WORKING by the user in session
+  55: "I confirm the padding to be working properly in K-Term"). This entry was never written at the time;
+  session 55 reconstructed it from `git diff`, not from memory, because Current Status was already
+  cross-referencing it.
+  REQUEST: "add a bit of padding to the side and top, like the bottom, to make sure not to cut a glyph if
+  a user is using rounded corner for his windows" (niri rounds window corners; with the grid flush to the
+  edge the corner glyphs were clipped).
+  IMPLEMENTED (file by file, from the diff):
+  * `include/k-term/k-term.h` — new `Config.padding` (px, all four sides, 0 = the old edge-to-edge
+    layout, and the note that the bottom margin is `padding` + the whole-cell remainder); new
+    `term_grid_geometry(win_w, win_h, cell_w, cell_h, pad, &cols, &rows, &xoff, &yoff)` prototype with the
+    three-users-must-agree rule in its comment; `Render.gx/gy` (the grid origin in buffer px), `Render.bg`,
+    `render_init(..., float opacity, uint32_t bg)` and `render_set_origin()`.
+  * `src/vt.c` — `term_grid_geometry()` implemented: margin on all four sides, margin capped so at least
+    one whole cell always fits, `cols = (win_w - 2*xoff) / cell_w` with the leftover pixels left at the
+    RIGHT/BOTTOM (that is what keeps `col = (ptr_x - xoff) / cell_w` exact).
+  * `src/config.c` — `padding` default 8 in `config_default`, and the `padding` key clamped 0..128.
+  * `src/main.c` — `Wayland.gx/gy`; `term_size_changed()` now makes ONE `term_grid_geometry()` call for
+    cols/rows AND the origin, stores it and passes it to `render_set_origin()`; `mouse_cell()` and
+    `sel_cell()` subtract `W.gx/W.gy` before dividing (and clamp, so a pointer in the margin hits the
+    first/last cell); the initial window is asked for `cols*cell_w + 2*padding` x `rows*cell_h +
+    2*padding`; the `grid resized` debug line gained `padding %d` and `unused %d x %d px`.
+  * `src/render.c` — `set_clear_color()` (the configured background premultiplied by `Config.opacity`, the
+    same rule the shader uses), called from `render_init` AND every `render_draw`; `render_draw` anchors
+    the quads at `r->gx/r->gy` with the remainder pushed to the bottom/right.
+  * `tests/test_vt.c` — the geometry block: the 936x1002/8x17 case with pad 0 vs pad 8, a sweep of
+    window/cell/padding combinations checking that the cell the pointer formula names is the cell the
+    renderer draws there, plus the degenerate cases (pad larger than the window -> still a 1x1 grid, a
+    1x1 window, a negative pad).
+  FOUND BY THIS WORK AND FIXED IN THE SAME SESSION: the margin was cleared with `DEF_BG`, not the
+  configured `background` (measured then: a `background = 0a0a2e` window with `padding = 20` had a 20 px
+  `(16,16,20)` band on all four sides). That is the `Render.bg`/`set_clear_color()`/per-frame `glClear`
+  part above; session 55 re-checked a recorded frame (ZERO `(16,16,20)` px, the whole window bbox exactly
+  `(10,10,46)`) and the user had already confirmed it in their window. ISSUES.md "Fixed".
+  NOT DOCUMENTED AS A BUG, ON THE USER'S RULING (session 55): one measurement showed blank CELLS at
+  `DEF_BG` while the margin was right (`src/vt.c` hardcodes `DEF_BG` in `row_new_cols`, `row_resize`,
+  `grid_reflow`'s fresh rows and the `grid_resize_rows` blanks; only main.c paints `conf.bg`). The user
+  says that is working as intended — do not re-open it, and do not go looking for it again.
+  VERIFIED: `make` 0 warnings, `make test` 364/0 + MODEL OK + CLI 77/0, `make asan` 364/0 clean (session
+  54 and again session 55).
+
+- 2026-10-15 (session 55, the user CONFIRMED padding works; asked for a "what is left" assessment, then
+  for "Cleanup + commit", and told me to STOP the visual/pixel testing — they verify the window themselves).
+  JOURNAL GAP FOUND AND FIXED: the session-54 padding work had NO Progress entry although Current Status
+  pointed at one; written above from the diff.
+  BASELINE RE-MEASURED (nothing was trusted from the journal): `make clean && make` exit 0 / 0 warnings
+  (/tmp/s55_build.log); `make test` -> `364 checks, 0 failures` + `MODEL OK (0 problems)` + `CLI: 77
+  checks, 0 failures, 0 skipped` (/tmp/s55_test.log); `make asan` -> `364 checks, 0 failures` + `MODEL OK`,
+  no LeakSanitizer/UBSan report (/tmp/s55_asan.log). Before this session's doc edits `git status` showed 12
+  modified files + untracked `tests/cli_test.sh`: sessions 52-54 were NOT committed.
+  DOC ACCURACY PASS (what was stale, and where it was fixed):
+  * ISSUES.md — Open #4 (the `DEF_BG` band) moved to "Fixed": it had been left there as "NOT VERIFIED"
+    only because session 54's compositor stopped honouring focus/raise; the user has since confirmed the
+    padding in their window and a lossless frame re-check agrees. Open #0 (no CLI coverage) moved to
+    "Fixed" — `tests/cli_test.sh` + `make test-cli` are in the tree and `make test` runs them, so the
+    "Fix in progress" wording was simply behind reality. The remaining Open items keep their numbers 1-3.
+    The "leftover pixels at the bottom/right" limitation was reworded: those pixels are the CONFIGURED
+    background (they used to be `DEF_BG`), and the bottom margin is `padding` + the remainder.
+  * docs/ARCHITECTURE.md — Modules table: `tests/test_vt.c` 323 -> 364 checks and the new
+    viewport-height-resize coverage, `tests/dbg.c` now mentions the zoom stages, and a `tests/cli_test.sh`
+    row was added (it had no entry at all). The `-d` log-line list now shows the `padding P` field that
+    `grid resized` actually prints (verified against a real run's output).
+  * README.md — the target table now lists `make test-cli` and describes `make test` correctly (it runs the
+    unit tests, the model checker AND the CLI tests). Flags table and the 18 settings rows were re-checked
+    against `src/main.c`'s `usage()` and `src/config.c`'s `apply()` — they already matched, all 18 keys.
+  * AGENT.md — Current Status re-dated to session 55 with the session-55 logs and the padding item marked
+    user-confirmed; Current Task rewritten (the session-53 zoom root-cause retelling and the session-52
+    #0/#1/#2 plan were dropped: #0 is done, the zoom cause lives in ISSUES.md "Fixed", and duplicating it
+    here is exactly what the journal rules forbid); the padding Progress entry added; Next Steps, Project
+    Files and History updated; the stale "323 checks" in the Project Files tree fixed.
+  ENVIRONMENT FACT (new, cost me time): the exported `NIRI_SOCKET` in this shell is STALE
+  (`niri.wayland-1.2298001.sock`); the live one is `/run/user/1000/niri.wayland-1.<pid>.sock` — find it
+  with `ls /run/user/1000/niri.*.sock` and export it, otherwise every `niri msg` dies with "error
+  connecting to the niri socket". With that fixed the compositor is cooperative again (`set-window-height
+  --id N` really resized a k-term window: `grid resized to 125x55` -> `125x38`, `configure answered` for
+  both). All test windows were closed by id; no k-term process left.
+  MY OWN MISTAKE THIS SESSION, recorded because it damaged this file (and it is the SECOND time the same
+  class of accident has happened — see the Key Decisions pitfall): a python block-move meant to relocate
+  the stranded sessions 52-55 Progress entries under `### Progress` used `s.index("## Next Steps")` and
+  `s.index("## Environment (verified 2026-10-12")` as anchors, but BOTH strings also occur inside the
+  session-54 entry, which quotes them while describing session 54's own splice accident. Result: the block
+  was cut mid-entry and the Environment heading was glued onto the end of a quoted sentence. REPAIRED by
+  moving the stranded tail back and restoring the heading (pre-repair copy kept at
+  `/tmp/s55/AGENT.md.before_repair`), then verified structurally: `grep -n "^## \|^### \|^- 2026-10-15
+  (session 5[2-5]" AGENT.md` now shows Progress (33-55, chronological) -> Environment -> History -> Next
+  Steps -> Project Files -> Key Decisions, with the session-54 entry whole again.
+  ALSO FIXED (structure, not content): the sessions 52-55 Progress entries had been sitting AFTER `##
+  History` since session 48's reordering, so the journal read as if they were history entries; they now
+  live under `### Progress` in chronological order, and History gained one era line for sessions 52-55.
+  NEXT ACTION: commit + push this state, then take on ISSUES.md Open #1 (the second-instance
+  `glTexImage2D 0x505` + SIGSEGV) — the only crash left — using the source and the tests, NOT screen
+  recording (the user's standing instruction: they verify anything visual themselves).
+
 ## Environment (verified 2026-10-12; re-confirmed live 2026-10-14 session 38; compositor state re-checked
-2026-10-15 sessions 47, 48 and 49)
+2026-10-15 sessions 47, 48, 49 and 55)
 - Gentoo Linux, kernel 6.18.54, gcc 15.3.0, pkg-config 3.0.7.
 - Wayland session active: `XDG_RUNTIME_DIR=/run/user/1000`, `WAYLAND_DISPLAY=wayland-1`
   (compositor is niri; advertises wl_seat v9, wl_compositor v6, wl_data_device_manager v3, wl_shm v2).
@@ -514,11 +740,22 @@ worth offering (both options, not open bugs):
   exists and `wayland-scanner` is installed, so the Makefile generates the bindings into `build/generated/`.
 - GPU: NVIDIA RTX 5070 (GL 4.6). Both `GL_ARB_draw_instanced` and `GL_ARB_instanced_arrays` are
   advertised, so the instanced path is active on this machine.
-- **Screenshots/recording:** `wf-recorder` 0.6.0 and `ffmpeg`/`ffprobe` 8.1.2 are installed (since
-  session 45) — record the screen and measure the picture (`ffmpeg -i out.mp4 -vf fps=10 f%04d.png`,
-  then diff frames with PIL/numpy). niri also has built-in screenshot actions. `grim`/`slurp`/
-  `wf-recorder`-older are NOT installed; a temporary `glReadPixels` ASCII-art readback still works for
-  per-cell pixel questions (see docs/ARCHITECTURE.md).
+- **`NIRI_SOCKET` in the shell environment is STALE** (session 55): it points at
+  `niri.wayland-1.2298001.sock` while the running compositor's is
+  `/run/user/1000/niri.wayland-1.<pid>.sock`. Every `niri msg` then dies with "error connecting to the
+  niri socket". Fix: `export NIRI_SOCKET=$(ls -t /run/user/1000/niri.wayland-1.*.sock | head -1)`.
+- **The user verifies anything visual themselves — do not run screen-recording or pixel-diff harnesses to
+  check how the window looks.** Stated directly in session 55 ("stop trying to do pointless visual test
+  when I have eyes over here"). Ask them and record their verdict; that is faster and it is the better
+  evidence. The tooling below exists for questions that cannot be answered any other way (and the user
+  must be told before it is used again). Prefer the headless route for logic: `tests/test_vt.c`,
+  `tests/dbg.c`, `tests/cli_test.sh`, and a throwaway program that links `src/vt.c` + `src/config.c`.
+- **Screenshots/recording (available, use only when justified):** `wf-recorder` 0.6.0 and
+  `ffmpeg`/`ffprobe` 8.1.2 are installed — `wf-recorder -o HDMI-A-1 -l -c ffv1 -f out.mkv` records
+  losslessly (bgr0), which is the only form worth trusting for exact colours; H.264 shifts them enough
+  that a colour match fails. Extract with `ffmpeg -i out.mkv -vf "select=eq(n\,15)" -vframes 1 f.png`
+  and count pixels with PIL/numpy. `grim`/`slurp` are NOT installed; a temporary `glReadPixels`
+  ASCII-art readback still works for per-cell pixel questions (see docs/ARCHITECTURE.md).
 - **Keyboard/pointer injection DOES work here (session 45 — this CORRECTS the old "Headless limit").**
   `/dev/uinput` is writable; a virtual keyboard shows up as `/dev/input/eventNN`, udev classifies it
   (`ID_INPUT_KEYBOARD=1`) and **niri/libinput opens it** (check `ls -l /proc/$(pgrep -x niri)/fd`).
@@ -676,23 +913,40 @@ worth offering (both options, not open bugs):
   unknown option now prints one generic `k-term: unknown option '<arg>'` plus the option list and exits 1.
   Verified by running the binary (31 CLI checks, 0 failures — argv is not unit-tested, main.c is not
   linked into bin/test_vt). README / docs/ARCHITECTURE.md / ISSUES.md synced. 323 checks unchanged.
+- **2026-10-15, sessions 52-55** — the user's three-item fix list and the padding feature. #0 (no CLI
+  coverage) is DONE: `tests/cli_test.sh` + a `test-cli` Makefile target that drives the real binary
+  (`CLI: 77 checks, 0 failures, 0 skipped`), negative-tested by deliberately breaking the parser. #1 (the
+  second-instance `atlas glTexImage2D failed: 0x505` + SIGSEGV) and #2 (`eglSwapBuffers failed: 0x3000` on
+  launch) are recorded in ISSUES.md "Open" and still unreproduced. Bug #4, zoom leaving stale prompt lines,
+  was root-caused in `grid_resize_rows` and fixed (ISSUES.md "Fixed", user-confirmed); tests 323 -> 346 ->
+  364. WINDOW PADDING (the `padding` config key + the single `term_grid_geometry()` helper that decides
+  cols/rows AND the grid origin) implemented, and it exposed the `DEF_BG` clear-colour bug, fixed the same
+  session; the user confirmed both in their real window (session 55). Session 55 was a docs/state audit:
+  the padding Progress entry had never been written, ISSUES.md still carried two resolved items as Open,
+  and three docs still quoted 323 checks — all corrected, and the sessions 52-55 work committed.
+  USER INSTRUCTION from session 55, still in force: they verify anything visual themselves, so do not run
+  screen-recording/pixel-diff harnesses to check how the window looks; use the headless tests and ask them.
 
 ## Next Steps
-1. **Nothing is pending verification** — the user confirmed the black-window fix, the heavy-output segfault
-   fix and the old `NextFeature.md` #2 (fullscreen) in their real window, and confirmed clipboard interop
-   both ways. `NextFeature.md` itself is DELETED (session 50: both of its items are done and confirmed),
-   so there is no work order on disk — ask the user what to build next.
-2. Housekeeping options: a CLI regression script checked into `tests/` (the option surface is currently
-   verified only by the throwaway `/tmp/s51_cli.sh` — 31 checks over the real binary; argv cannot be
-   unit-tested the way vt.c is, because main.c is not linked into `bin/test_vt`, so a `make test-cli`
-   target would be the honest way to keep it covered); make the ASan build of the `k-term` binary a real Makefile target (only the
-   tests have one; the hand-built one in `.scratch/kterm_asan` found the `row[rcap]` overrun, so a
-   `make asan` that also covers the Wayland/EGL path would pay off — it would also cover the heap-grown
-   `paste_buf`); idle-frame
-   optimization (stop the frame cycle when nothing is dirty); the color atlas is re-uploaded whole with
-   `glTexImage2D` whenever a new emoji is shaped — `glTexSubImage2D` per new shelf would be cheaper; a
-   reflow currently allocates a fresh row buffer per produced line (fine at terminal sizes, but a
-   huge-width window with a huge scrollback churns the allocator).
+1. **Two real bugs are open, both user-reported, both in ISSUES.md "Open"** — start with #1, the only
+   crash left:
+   * **#1** launching `k-term` while another k-term is still running prints `atlas glTexImage2D failed:
+     0x505 (512x512)` (GL_INVALID_VALUE on the mono atlas upload in `render_draw`) and then SIGSEGV.
+     Never reproduced here yet. Work from the source and a headless harness, not from the screen.
+   * **#2** `eglSwapBuffers failed: 0x3000` (EGL_BAD_ALLOC) on launch plus one `swap failed (1 in a row)`
+     warning; the retry works and nothing looks wrong. Decide whether it is a real first-frame race worth
+     fixing or just a log line to soften.
+   Everything else the user has confirmed working in their own window (padding, zoom, fullscreen,
+   black-window fix, heavy-output segfault, clipboard both ways, transparency, key repeat, selection).
+2. Housekeeping options (none of them a bug): make the ASan build of the `k-term` binary a real Makefile
+   target (only the tests have one; the hand-built one in `.scratch/kterm_asan` found the `row[rcap]`
+   overrun, so covering the Wayland/EGL path would pay off — it would also cover the heap-grown
+   `paste_buf`); idle-frame optimization (stop the frame cycle when nothing is dirty); the color atlas is
+   re-uploaded whole with `glTexImage2D` whenever a new emoji is shaped — `glTexSubImage2D` per new shelf
+   would be cheaper; a reflow allocates a fresh row buffer per produced line (fine at terminal sizes, but
+   a huge-width window with a huge scrollback churns the allocator); the window title is parsed into
+   `Term.title` but never pushed to the compositor (ISSUES.md "Known limitations" — wiring it up is a
+   one-liner in `xdg_toplevel_set_title`, but it changes visible behaviour, so ask first).
 3. Clipboard hardening that niri does NOT require (do not do it unasked — it is untested against a
    compositor that needs it): call `wl_data_offer_accept()` before `wl_data_offer_receive()`, and offer /
    prefer `UTF8_STRING` + `text/plain;charset=utf-8` next to `text/plain`. Current behaviour is verified
@@ -724,17 +978,21 @@ K-Term/
 ├── AGENT.md                   # this journal
 ├── ISSUES.md                  # open bugs + known limitations + fixed history (root causes)
 ├── README.md                  # features, deps, build, flags, config, shortcuts
-├── Makefile                   # src/*.c -> build/*.o -> bin/k-term; test/asan/run/clean; WARN set
+├── Makefile                   # src/*.c -> build/*.o -> bin/k-term; test/test-cli/asan/run/clean; WARN set
 ├── docs/ARCHITECTURE.md       # module map, event loop, grid invariants, reflow, color emoji, debug entry points
 ├── include/k-term/k-term.h    # the single shared header (all types + prototypes)
 ├── src/                       # config.c vt.c pty.c font.c render.c main.c
-├── tests/test_vt.c            # 323 checks: parser, grid, selection (incl. sub-cell), alt screen,
+├── tests/test_vt.c            # 364 checks: parser, grid, selection (incl. sub-cell), alt screen,
 │                              #   live_off, emoji clusters (ZWJ / skin tone / VS16 / keycap / flag pair),
 │                              #   CSI 3 J, bracketed paste, term_init guard, REFLOW (round trip, cursor,
-│                              #   wide pairs, eviction, hard breaks, coloured blanks, alt screen,
-│                              #   a viewport grown past half of rcap (the row[] overrun)
-├── tests/dbg.c                # grid-model invariant checker (ed3*, resize, reflow and grow-then-scroll
-│                              #   permutation stages)
+│                              #   wide pairs, eviction, hard breaks, coloured blanks, alt screen),
+│                              #   term_grid_geometry (padding + the pointer/cell sweep), the zoom/alt-screen
+│                              #   row-shrink rule, a viewport grown past half of rcap (the row[] overrun)
+├── tests/dbg.c                # grid-model invariant checker (ed3*, resize, reflow, grow-then-scroll and
+│                              #   zoom/alt-screen permutation stages)
+├── tests/cli_test.sh          # 77 checks over the real bin/k-term: every flag, long form, error message
+│                              #   and exit code (main() is in no test binary, so this is the only honest
+│                              #   way to cover argv); run by `make test-cli`, which `make test` needs
 ├── bin/                       # k-term, test_vt, dbg (+ *_asan)   [generated]
 └── build/                     # *.o + generated/xdg-shell-*        [generated]
 ```
@@ -748,7 +1006,7 @@ K-Term/
 - `src/pty.c` — PTY spawn, child session setup, resize, TERM/COLORTERM/TERM_PROGRAM env.
 - `src/config.c` — `key = value` config parser + defaults + clamping.
 - `Makefile` — pkg-config-driven; `-Iinclude/k-term -Ibuild/generated`; output dirs created by
-  order-only prerequisites so they never force rebuilds; targets `all test asan run clean`.
+  order-only prerequisites so they never force rebuilds; targets `all test test-cli asan run clean`.
 
 ## Key Decisions & Pitfalls
 Design invariants and Wayland protocol gotchas are documented in docs/ARCHITECTURE.md — grid top-left
@@ -797,6 +1055,14 @@ exist). Bug root causes are in ISSUES.md "Fixed". The decisions below are projec
    `git log --oneline` / `git status` before assuming anything is committed, and never commit `bin/` or
    `build/` (the session-50 `.gitignore` covers them; the previous one, a kernel-module template, did
    NOT, which is why a build used to show up in `git status`).
+- **Pitfall — splicing this journal with computed indices has damaged it twice (sessions 54 and 55).**
+  Both accidents had the same cause: an anchor string that also appears INSIDE a journal entry (entries
+  quote section headings like `## Next Steps` / `## Environment` when describing earlier accidents), or an
+  index captured before an earlier mutation in the same script. Rule: anchor on text that is unique in the
+  file (check with `grep -c` first), re-find every anchor after each mutation, and `git diff` the result
+  before moving on. Session 55's accident cut a Progress entry in half and moved it next to a heading it
+  quoted; it was repaired from `/tmp/s55/AGENT.md.before_repair`, and the entry that describes it is the
+  session-54 one.
 - **Pitfall — a `(void)x;` line does not mean `x` is unused.** `csi_dispatch` carried `(void)def1;`,
   which reads like "this local is a leftover"; deleting `def1` broke the build because it is really used
   by `CSI J` (erase display), `CSI K` (erase line) and `CSI 6 n` (CPR). Session 50 removed only the cast

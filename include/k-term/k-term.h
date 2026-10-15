@@ -167,10 +167,26 @@ void grid_init(Grid *g, int rows, int cols, int scrollback);
 void grid_resize(Grid *g, int rows, int cols, int *slot, int *col);
 /* Same, but WITHOUT reflow: rows are truncated/grown in place. Used for the alternate screen,
    where a full-screen application repaints itself after a SIGWINCH instead of expecting the
-   terminal to re-wrap its output. */
-void grid_resize_plain(Grid *g, int rows, int cols);
+   terminal to re-wrap its output.
+   cur_slot is the absolute row[] slot of the cell that must stay on screen (the cursor), or -1.
+   On a height SHRINK the viewport gives up its BOTTOM rows while the cursor has rows below it, and
+   only after that its TOP rows (into scrollback). Either way the tracked cell keeps its content
+   line; if it instead got pushed out of the viewport the application would repaint at the wrong
+   place and leave its old output behind (ISSUES.md #4). */
+void grid_resize_plain(Grid *g, int rows, int cols, int cur_slot);
 void grid_destroy(Grid *g);
 Cell *grid_vprow(Grid *g, int y);   /* viewport row y (0..rows-1) */
+
+/* Window pixel size + cell size + a margin -> the grid size AND the pixel offset the grid starts at.
+ * One function because THREE places must agree on this geometry: main.c's cols/rows for the grid and
+ * the PTY, main.c's pointer -> cell mapping (selection, SGR mouse reporting), and render.c's quad
+ * offsets. Any drift between them puts the highlight on the wrong glyph.
+ * Rules: the margin is applied on all four sides (so no glyph sits under a rounded window corner);
+ * the margin is clamped so at least one whole cell always fits; the leftover pixels that do not fill a
+ * whole cell stay at the RIGHT and BOTTOM, which is what keeps the pointer mapping exact
+ * (col = (ptr_x - xoff) / cell_w). pad = 0 is the old edge-to-edge layout (xoff = yoff = 0). */
+void term_grid_geometry(int win_w, int win_h, int cell_w, int cell_h, int pad,
+                        int *cols, int *rows, int *xoff, int *yoff);
 
 /* terminal */
 void term_init(Term *t, int rows, int cols, int scrollback);
@@ -238,6 +254,11 @@ typedef struct Config {
        way). repeat_rate = repeats per second once it starts. */
     int  repeat_delay;
     int  repeat_rate;
+    /* Margin in px between the window edge and the first/last cell row/column, applied on all four
+       sides. Keeps the corner glyphs out of a compositor's rounded window corners. 0 = the grid
+       touches the window edge (the layout before this setting existed). The pixels left over after
+       whole cells still belong to the bottom/right, so the bottom margin is padding + remainder. */
+    int  padding;
     int  loglevel;
 } Config;
 
@@ -344,18 +365,27 @@ typedef struct Render {
     float *edata;                /* CPU staging: expanded per-vertex data (fallback only) */
     int ecap;
     int vw, vh;                  /* buffer size in px */
+    /* Where the grid starts inside the buffer, in px (the Config.padding margin). main.c computes it
+       with term_grid_geometry() — the SAME call it uses for cols/rows and for the pointer -> cell
+       mapping — and hands it over with render_set_origin(), so the quads and the pointer mapping can
+       never disagree. 0,0 is the old edge-to-edge layout. */
+    int gx, gy;
     int u_mvp, u_atlas, u_catlas, u_sel;
     void *set_div;               /* glVertexAttribDivisorARB or NULL */
     void *draw_inst;             /* glDrawArraysInstancedARB or NULL */
     int inst_ok;                 /* 1 when both ARB instancing extensions are available */
     float opacity;               /* window background alpha 0..1 (from Config.opacity) */
+    uint32_t bg;                 /* configured background ARGB, used to clear the buffer so the
+                                    Config.padding margin matches the cell backgrounds */
     void *ecfg;                  /* EGLConfig */
     void *nwin;                  /* EGLNativeWindowType (wl_egl_window) */
 } Render;
 
-int  render_init(Render *r, void *wl_display, void *egl_window, int w, int h, float opacity);
+int  render_init(Render *r, void *wl_display, void *egl_window, int w, int h, float opacity,
+                 uint32_t bg);
 int render_draw(Render *r, Term *t, Font *f);   /* 1 = a new buffer was attached, 0 = swap failed */
 void render_resize(Render *r, int w, int h);
+void render_set_origin(Render *r, int gx, int gy);   /* grid offset in buffer px (see Render.gx) */
 void render_destroy(Render *r);
 
 /* ---------- misc utils ---------- */

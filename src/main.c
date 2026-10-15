@@ -49,6 +49,10 @@ typedef struct Wayland {
     int comp_ver;               /* bound wl_compositor interface version */
     int pw, ph;                 /* pending configure size (px) */
     int cur_w, cur_h;           /* applied size (px) */
+    /* Where the grid starts inside the window, in px (the Config.padding margin). Set together with
+       the grid size in term_size_changed() and handed to render.c, so the quads, the selection and
+       the SGR mouse coordinates all use the same origin. */
+    int gx, gy;
     int first_done;
     /* The one outstanding wl_surface_frame callback, NULL when none is in flight. It replaces the old
        `frame_armed` flag and `swapped` counter: the callback OBJECT is the state, so it cannot drift
@@ -158,14 +162,21 @@ static void term_size_changed(void)
 {
     if (!W.egl_window)
         return;
-    int cols = imax_(1, W.cur_w / font.cell_w);
-    int rows = imax_(1, W.cur_h / font.cell_h);
+    /* One call decides the grid size AND its pixel origin; sel_cell()/mouse_cell() and render.c use
+       the same origin, so a click can never land on a different cell than the one drawn there. */
+    int cols, rows, gx, gy;
+    term_grid_geometry(W.cur_w, W.cur_h, font.cell_w, font.cell_h, conf.padding,
+                       &cols, &rows, &gx, &gy);
+    W.gx = gx;
+    W.gy = gy;
+    render_set_origin(&rend, gx, gy);
     if (cols != term.g.cols || rows != term.g.rows) {
         term_resize(&term, rows, cols);
         pty_setsize(&pty, rows, cols);
-        klog(L_DEBUG, "grid resized to %dx%d (window %dx%d px, cell %dx%d, unused %d x %d px)",
-             cols, rows, W.cur_w, W.cur_h, font.cell_w, font.cell_h,
-             W.cur_w - cols * font.cell_w, W.cur_h - rows * font.cell_h);
+        klog(L_DEBUG, "grid resized to %dx%d (window %dx%d px, cell %dx%d, padding %d, "
+             "unused %d x %d px)",
+             cols, rows, W.cur_w, W.cur_h, font.cell_w, font.cell_h, conf.padding,
+             W.cur_w - 2 * gx - cols * font.cell_w, W.cur_h - 2 * gy - rows * font.cell_h);
     }
 }
 
@@ -591,23 +602,24 @@ static void mouse_cell(int *col, int *row)
 {
     int cw = font.cell_w > 0 ? font.cell_w : 1;
     int ch = font.cell_h > 0 ? font.cell_h : 1;
-    *col = iclamp_(W.ptr_x / cw, 0, term.g.cols - 1) + 1;   /* 1-based */
-    *row = iclamp_(W.ptr_y / ch, 0, term.g.rows - 1) + 1;
+    *col = iclamp_((W.ptr_x - W.gx) / cw, 0, term.g.cols - 1) + 1;   /* 1-based */
+    *row = iclamp_((W.ptr_y - W.gy) / ch, 0, term.g.rows - 1) + 1;
 }
 
 /* 0-based viewport cell under the pointer.
    Selection is CELL granular: no sub-cell fraction is computed here any more, so an
    endpoint can never land in the middle of a glyph (see sel_set_endpoints).
-   This mapping is exact only because render.c anchors the grid at the window's TOP-LEFT: viewport
-   row y occupies window pixels [y*cell_h, (y+1)*cell_h) and column x occupies
-   [x*cell_w, (x+1)*cell_w). Any leftover pixels (cur_h % cell_h, cur_w % cell_w) sit at the
-   bottom/right of the window, so a pointer there simply clamps to the last row/column. */
+   This mapping is exact only because render.c draws the grid at the SAME origin this computes:
+   viewport row y occupies window pixels [gy + y*cell_h, gy + (y+1)*cell_h) and column x occupies
+   [gx + x*cell_w, gx + (x+1)*cell_w). term_grid_geometry() puts the margin on all four sides and
+   leaves any leftover pixels (the whole-cell remainder) at the bottom/right, so a pointer in the
+   margin or in those leftovers simply clamps to the first/last row and column. */
 static void sel_cell(int *col, int *row)
 {
     int cw = font.cell_w > 0 ? font.cell_w : 1;
     int ch = font.cell_h > 0 ? font.cell_h : 1;
-    *col = iclamp_(W.ptr_x / cw, 0, term.g.cols - 1);
-    *row = iclamp_(W.ptr_y / ch, 0, term.g.rows - 1);
+    *col = iclamp_((W.ptr_x - W.gx) / cw, 0, term.g.cols - 1);
+    *row = iclamp_((W.ptr_y - W.gy) / ch, 0, term.g.rows - 1);
 }
 
 /* Set both selection endpoints: the anchor cell and the cell the pointer is on now.
@@ -1212,7 +1224,7 @@ static int wayland_setup(int init_w, int init_h)
         klog(L_ERROR, "wl_egl_window_create failed");
         return -1;
     }
-    if (render_init(&rend, W.display, W.egl_window, init_w, init_h, conf.opacity) < 0) {
+    if (render_init(&rend, W.display, W.egl_window, init_w, init_h, conf.opacity, conf.bg) < 0) {
         klog(L_ERROR, "render_init failed");
         return -1;
     }
@@ -1376,8 +1388,10 @@ int main(int argc, char **argv)
     term.pen.bg = conf.bg;
     term.pen.fg = conf.fg;
 
-    int init_w = conf.cols * font.cell_w;
-    int init_h = conf.rows * font.cell_h;
+    /* The window is asked for the grid PLUS the margin on both sides; the compositor may answer with
+       a different pixel size, and term_size_changed() then recomputes cols/rows from what it got. */
+    int init_w = conf.cols * font.cell_w + 2 * conf.padding;
+    int init_h = conf.rows * font.cell_h + 2 * conf.padding;
 
     if (wayland_setup(init_w, init_h) < 0)
         return 1;

@@ -4,7 +4,29 @@ Read this before starting work. Root causes are kept short — enough to reprodu
 re-introducing the bug. Module design is in docs/ARCHITECTURE.md.
 
 ## Open
-1. **LeakSanitizer reports only third-party frames.** An ASan build of the `k-term` binary itself
+1. **Second instance crashes: `atlas glTexImage2D failed: 0x505 (512x512)` then SIGSEGV** (user report,
+   2026-10-15). Reproduce as reported: leave one `k-term` running (their words: a process left hanging in
+   the background), then start another from a shell ->
+   ```
+   k-term error: atlas glTexImage2D failed: 0x505 (512x512)
+   fish: Job 1, 'k-term' terminated by signal SIGSEGV (Address boundary error)
+   ```
+   With no leftover process, two launches in a row both work. `0x505` is `GL_INVALID_VALUE` from the mono
+   atlas upload in `render_draw` (src/render.c), i.e. the failure happens on the FIRST frame that has
+   glyphs to draw, and the segfault follows immediately. Note: `0x505` and `0x3000` lines were previously
+   (session 42) dismissed as artifacts of the probe/timeout harnesses — that dismissal is now withdrawn,
+   the user sees them in normal use. Not yet reproduced here; investigation in progress (session 52).
+2. **`eglSwapBuffers failed: 0x3000` on launch** (user report, 2026-10-15). Reproduce: start `k-term`
+   normally ->
+   ```
+   k-term error: eglSwapBuffers failed: 0x3000
+   k-term warn: swap failed (1 in a row), retrying on the next frame
+   ```
+   No visible effect: the 8 ms timer retries and the window draws correctly. `0x3000` is `EGL_BAD_ALLOC`.
+   The frame-pacing code already handles a failed swap correctly (it keeps the frame dirty and arms no
+   frame callback), so this is a spurious first-frame failure plus an error line, not a freeze — but it
+   should not happen at all. Investigation in progress (session 52).
+3. **LeakSanitizer reports only third-party frames.** An ASan build of the `k-term` binary itself
    reports leaks inside libdbus-1, libwayland-client and dynamically loaded driver modules; no leak
    frames in K-Term source. Not a K-Term bug. (There is currently no `k-term` ASan target — only the
    tests have one; adding one is listed in AGENT.md Next Steps.)
@@ -35,9 +57,10 @@ Not bugs — current behaviour the user has to know about. (Root causes of actua
   copied text is unaffected (blank cells copy as spaces, trailing spaces per line are trimmed).
 * **A few leftover pixels at the bottom/right of the window.** The grid is sized with floor division
   (`cols = w / cell_w`), so unless the window is an exact multiple of the cell, `w % cell_w` px and
-  `h % cell_h` px are painted with the plain background (e.g. 6 x 12 px on a 936x1002 window with a
-  10x18 cell). Deliberate: the grid is anchored at the top-left so `ptr / cell` names the right cell
-  (see docs/ARCHITECTURE.md, "Window geometry").
+  `h % cell_h` px are left over (e.g. 3 x 8 px on a 1253x1002 window with a 10x18 cell). They are painted
+  with the configured `background`, exactly like the `padding` margin, and stay at the bottom/right:
+  the grid is anchored at the top-left so `ptr / cell` names the right cell (see docs/ARCHITECTURE.md,
+  "Window geometry"). The bottom margin is therefore `padding` + the vertical remainder.
 * **Color emoji come from whatever color font fontconfig finds.** With a bitmap-only font
   (Noto Color Emoji on this box) there is a single 128px strike, so zoomed emoji are scaled from that
   one strike instead of being re-rendered. At most `CLUSTER_MAX` = 8 modifier codepoints fold into one
@@ -84,6 +107,66 @@ Not bugs — current behaviour the user has to know about. (Root causes of actua
   never repeats for you).
 
 ## Fixed (root cause -> fix)
+- **The band around the grid was painted with `DEF_BG`, not the configured `background`** (found by the
+  session-54 padding work; the user CONFIRMED it correct in their real window on 2026-10-15, and a
+  lossless `wf-recorder -c ffv1` frame re-check agrees). Symptom before the fix, with `background =
+  0a0a2e` and `padding = 20`: the configured colour's bounding box was exactly the grid and the 20 px
+  band around it was `(16,16,20)` = `DEF_BG`. Root cause: `render_init` hardcoded `DEF_BG` in
+  `glClearColor`, and nothing else ever writes the pixels outside the cell quads — the padding margin,
+  and before that the whole-cell remainder at the bottom/right of any window whose size is not an exact
+  multiple of the cell. It also cleared only once, in `render_init`, so only one of the driver's buffers
+  was ever cleared.
+  Fix (session 54): `Render.bg` is set from `conf.bg` through the new
+  `render_init(..., float opacity, uint32_t bg)` parameter; `set_clear_color()` premultiplies it by
+  `Config.opacity` (the buffer is premultiplied — same rule as the shader); `render_draw` clears every
+  frame. Verified: a recorded frame with a custom `background` + `padding = 20` has ZERO `(16,16,20)`
+  pixels and the whole window bbox reads exactly `(10,10,46)`.
+- **The command-line surface had no automated coverage** (session 52). `make test` ran `tests/test_vt.c`
+  and `tests/dbg.c`, which link `src/vt.c` + `src/config.c` only, so `src/main.c` — and with it `main()`'s
+  argument parser — was in no test binary: renaming a flag, breaking `--name=VALUE` or reviving a
+  special-case error message left `make test` green. The session-51 flag change had been verified only by
+  a throwaway script in `/tmp`.
+  Fix: `tests/cli_test.sh` (POSIX sh, checked in) + a `test-cli` Makefile target that depends on
+  `bin/k-term` and runs it; `test` depends on `test-cli`, so `make test` covers the flags. The script
+  drives the REAL binary (argv cannot be unit-tested: main.c is not linked into `bin/test_vt`), wraps every
+  launch in `timeout -k 2 15`, cleans its temp dir with a trap, and prints a SKIP for the window-opening
+  checks when `WAYLAND_DISPLAY` is unset. Coverage: `-h`/`--help` identical and listing all six options
+  with no `-C`; `-v`/`--version`; `-C -f -s -r -o -x --bogus` each rejected with the identical generic
+  first line + usage + exit 1 + nothing on stdout; every option's missing-argument message; `-c FILE` /
+  `--config FILE` / `--config=FILE` really loading the file; `-d` beating `log = 0` in the file; `-w DIR`
+  logging `shell starts in DIR`; `-e COMMAND` exiting by itself; all flags combined.
+  `make test-cli` -> `CLI: 77 checks, 0 failures, 0 skipped`. Negative test: reverting `-c` to `-C` and
+  re-adding a `-o`-specific message produced 15 failures naming exactly those behaviours.
+- **Zooming in and out left stale prompt lines and uneven gaps** (user report, 2026-10-15, sessions
+  53-54, the user CONFIRMED the fix in their real window: "Zoom is fixed and now works as expected").
+  Screenshots compared K-Term with kitty: kitty's prompts stay packed, K-Term's drifted apart and old
+  prompt lines stayed on screen. Reproduced headless (`.scratch/s53/pty_zoom.c`: real fish in a real
+  PTY, real vt.c model, zoom-style resizes where cols AND rows change together):
+  ```
+  == startup (30x100):      prompt at slots 1-2, cursor cy=2
+  == zoom in 2 (41x78):     prompt at slots 1-2 (now scrollback) AND a new one at 10-11  -> 8 blank rows
+  == zoom out 3 (62x117):   prompts at 1-2, 10-11, 13-14                                 -> two gaps
+  ```
+  Root cause: `grid_resize_rows()`'s shrink loop always gave up the viewport's TOP row (it became the
+  newest scrollback line). When the viewport shrank by MORE rows than the cursor had rows above it — the
+  normal case at a prompt, where everything below the cursor is blank — the cursor's own line was pushed
+  into scrollback and `term_resize()` then clamped `t->cy` to 0. The cursor was no longer on its content
+  line, so the shell's SIGWINCH prompt repaint drew a SECOND prompt at the clamped cursor and the
+  original stayed behind as stale text; each zoom step added one more copy. Not a renderer bug, not
+  reflow, not the zoom code (`zoom_apply`/`term_size_changed` are fine).
+  Fix (src/vt.c + the k-term.h prototype): `grid_resize_rows(Grid *, int rows, int cur_slot)` gives up
+  the viewport's BOTTOM row (blanked, becomes a free slot) while the cursor still has rows below it, and
+  only after that falls back to the old top-row-into-scrollback behaviour (which keeps the newest content
+  visible and moves the cursor's viewport row with it). `grid_resize` passes the cursor slot AFTER
+  `grid_reflow` has moved it; `grid_resize_plain` gained a `cur_slot` argument so the alternate screen
+  (vim/htop) keeps the same rule; -1 means "no cursor to preserve" = the old behaviour.
+  Verified: 23 new checks in tests/test_vt.c (cursor slot preserved across a shrink that removes more
+  rows than the cursor has above it, content below the cursor dropped rather than scrolled, a full
+  viewport still scrolls into scrollback, mid-text shrink, alt-screen shrink, three zoom cycles leave
+  exactly the two prompt lines) + `zoom-*`/`alt-*` stages in tests/dbg.c for the row[] permutation
+  invariant; 323 -> 346 checks, `MODEL OK`. Negative test: the new checks against the pre-fix vt.c give
+  16 failures, all of them the zoom checks. The headless fish harness now shows exactly ONE prompt after
+  six zoom steps (was three prompts and two gaps).
 - **Fullscreen: the display stopped refreshing** (user report, `NextFeature.md` #2; sessions 45-47, the
   user CONFIRMED the fix in their real window on 2026-10-15). Symptom was: enter fullscreen (niri
   `Mod+Shift+M`) and the terminal stops updating — no typed characters and no command output appear —

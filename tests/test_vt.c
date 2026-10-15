@@ -402,6 +402,156 @@ int main(void)
     row_text(1, row);
     CHECK(row[0] == '6', "shrink keeps bottom line (no scrollback)");
 
+    /* --- a height SHRINK must never move the cursor off its own line ---------------------------
+       The zoom bug (ISSUES.md #4): zooming changes cols AND rows at once. The old shrink always gave
+       up the viewport's TOP row, so a shrink larger than the number of rows above the cursor pushed
+       the cursor's own line into scrollback; term_resize then clamped cy to 0, the shell repainted
+       its prompt at that clamped cursor, and every zoom step left one stale prompt and a blank gap.
+       The rule that fixes it: give up the rows BELOW the cursor first. */
+    term_destroy(&T);
+    term_init(&T, 20, 20, 100);
+    feed("\r\nPROMPT-ONE\r\nPROMPT-TWO > ");     /* a two-line prompt, cursor on viewport row 2 */
+    CHECK(T.cy == 2, "prompt: the cursor sits on row 2");
+    int pslot = T.g.live_off + T.cy;            /* the cursor's absolute row[] slot */
+    term_resize(&T, 8, 20);                     /* shrink by 12: far more than the 2 rows above it */
+    CHECK(T.g.live_off + T.cy == pslot, "shrink keeps the cursor on its own row[] slot");
+    CHECK(T.cy == 2, "shrink keeps the cursor's viewport row");
+    CHECK(T.g.live_off == 0, "shrink with blank rows below the cursor pushes nothing into scrollback");
+    CHECK(T.g.scroll_off + T.g.rows == 8, "shrink: used == rows, the freed slots stay below");
+    row_text(1, row);
+    CHECK(!memcmp(row, "PROMPT-ONE", 10), "shrink keeps the prompt's first line visible");
+    row_text(2, row);
+    CHECK(!memcmp(row, "PROMPT-TWO", 10), "shrink keeps the line the cursor is on");
+    term_resize(&T, 20, 20);                    /* zoom back out */
+    CHECK(T.g.live_off + T.cy == pslot && T.cy == 2, "grow back keeps the cursor where it was");
+    /* three whole zoom cycles (cols AND rows, like zoom_apply) must not duplicate the prompt */
+    for (int cyc = 0; cyc < 3; cyc++) {
+        term_resize(&T, 6, 16);
+        term_resize(&T, 20, 20);
+    }
+    int copies = 0;
+    for (int y = 0; y < T.g.rows; y++) {
+        row_text(y, row);
+        if (!memcmp(row, "PROMPT", 6))
+            copies++;
+    }
+    CHECK(copies == 2, "three zoom cycles leave exactly the two prompt lines (no leftovers)");
+    CHECK(T.g.live_off + T.cy == pslot, "zoom cycles keep the cursor slot");
+    CHECK(T.g.scroll_off <= T.g.live_off &&
+          T.g.live_off <= imin_(T.g.scrollback_max, T.g.rcap - T.g.rows) &&
+          T.g.scroll_off + T.g.rows <= T.g.rcap, "zoom cycles keep the grid invariant");
+
+    /* Rows below the cursor are only spare while they are blank. When the viewport is full of text
+       (cursor on the bottom row) the OLD rule still applies: the top line goes to scrollback, the
+       newest content stays visible, and the cursor travels with its own line. */
+    term_destroy(&T);
+    term_init(&T, 10, 10, 100);
+    for (int i = 0; i < 6; i++) { char l[8]; snprintf(l, sizeof l, "L%d\r\n", i); feed(l); }
+    CHECK(T.cy == 6, "six lines: cursor on row 6, rows 7..9 blank");
+    int fslot = T.g.live_off + T.cy;
+    term_resize(&T, 3, 10);
+    CHECK(T.g.live_off + T.cy == fslot, "full-viewport shrink keeps the cursor slot");
+    CHECK(T.g.scroll_off == 4, "full-viewport shrink pushes the top lines into scrollback");
+    row_text(0, row);
+    CHECK(row[0] == 'L' && row[1] == '4', "full-viewport shrink keeps the NEWEST lines visible");
+
+    /* And when the cursor sits in the middle of a block of text, the rows given up are the ones under
+       it — the same trade-off kitty makes, and what keeps the application's cursor anchored. */
+    term_destroy(&T);
+    term_init(&T, 10, 10, 100);
+    for (int i = 0; i < 8; i++) { char l[8]; snprintf(l, sizeof l, "M%d\r\n", i); feed(l); }
+    feed("\x1b[3H");                            /* cursor up to row 2, text below it */
+    int mslot = T.g.live_off + T.cy;
+    term_resize(&T, 5, 10);
+    CHECK(T.g.live_off + T.cy == mslot, "mid-text shrink keeps the cursor slot");
+    CHECK(T.cy == 2, "mid-text shrink keeps the cursor's viewport row");
+    row_text(2, row);
+    CHECK(row[0] == 'M' && row[1] == '2', "mid-text shrink keeps the cursor's line");
+    row_text(4, row);
+    CHECK(row[0] == 'M' && row[1] == '4', "mid-text shrink keeps the rows down to the new bottom");
+
+    /* The alternate screen follows the same rule (grid_resize_plain gets the cursor slot), so a
+       full-screen application keeps its cursor anchored across a zoom too. */
+    term_destroy(&T);
+    term_init(&T, 10, 10, 100);
+    feed("\x1b[?1049h");
+    feed("V1\r\nV2\r\nV3");
+    CHECK(T.alt_screen == 1, "alt screen active");
+    int aslot = T.g.live_off + T.cy;
+    term_resize(&T, 4, 10);
+    CHECK(T.g.live_off + T.cy == aslot, "alt screen shrink keeps the cursor slot");
+    CHECK(T.cy == 2, "alt screen shrink keeps the cursor's viewport row");
+    row_text(2, row);
+    CHECK(row[0] == 'V' && row[1] == '3', "alt screen keeps the cursor's line visible");
+    feed("\x1b[?1049l");
+
+    /* --- window padding: one helper decides the grid size AND its pixel origin -----------------
+       main.c uses the returned offset for the pointer -> cell mapping and hands it to render.c, so
+       these checks are what keep a click, the highlight and the drawn glyph on the same cell. */
+    int cols, rows, xoff, yoff;
+    term_grid_geometry(936, 1002, 8, 17, 0, &cols, &rows, &xoff, &yoff);
+    CHECK(cols == 117 && rows == 58 && xoff == 0 && yoff == 0,
+          "padding 0 is the old edge-to-edge layout (window/cell, remainder at bottom/right)");
+    term_grid_geometry(936, 1002, 8, 17, 8, &cols, &rows, &xoff, &yoff);
+    CHECK(xoff == 8 && yoff == 8, "the margin is applied on the left AND the top");
+    CHECK(cols == 115, "16 px of margin costs exactly 2 columns at an 8 px cell");
+    CHECK(rows == 58, "the same 16 px costs no row at a 17 px cell — the remainder absorbed it");
+    /* The grid must fill the space between the margins, and one more cell must not fit there — that
+       is what makes the pointer mapping exact rather than approximate. */
+    CHECK(xoff + cols * 8 <= 936 && (cols + 1) * 8 > 936 - 2 * xoff,
+          "the grid fills the space between the two margins; one more column would not fit");
+    CHECK(yoff + rows * 17 <= 1002 && (rows + 1) * 17 > 1002 - 2 * yoff,
+          "and the same vertically, so the leftover pixels stay at the bottom");
+    /* The remainder belongs at the bottom/right: the bottom margin is the configured one PLUS the
+       leftover pixels, the top margin is exactly what was configured. */
+    CHECK(1002 - yoff - rows * 17 >= yoff, "the bottom margin is never smaller than the top one");
+    CHECK(936 - xoff - cols * 8 >= xoff, "the right margin is never smaller than the left one");
+    /* Every pixel of the GRID area must map to the cell drawn under it: the input side is main.c's
+       (p - off)/cell clamped, the output side is render.c's off + cell*cellw span. A mismatch is a
+       dead zone (a click that highlights a different glyph than the one under the pointer), which is
+       exactly what a padding change could introduce. Pixels in the margin are deliberately clamped to
+       the first/last cell, so the sweep covers the grid area only. Counted per geometry, so one check
+       per window size rather than one per pixel. */
+    struct { int w, h, cw, ch, pad; } geos[] = {
+        { 936, 1002, 8, 17, 0 }, { 936, 1002, 8, 17, 8 }, { 300, 200, 9, 19, 4 },
+        { 120, 90, 8, 17, 20 }, { 40, 40, 8, 17, 30 }, { 17, 17, 8, 17, 8 },
+    };
+    for (size_t gi = 0; gi < sizeof geos / sizeof geos[0]; gi++) {
+        int gw = geos[gi].w, gh = geos[gi].h, cw = geos[gi].cw, ch = geos[gi].ch;
+        term_grid_geometry(gw, gh, cw, ch, geos[gi].pad, &cols, &rows, &xoff, &yoff);
+        int bad = 0;
+        if (cols < 1 || rows < 1 || xoff < 0 || yoff < 0)
+            bad = 1;
+        /* the grid must lie inside the window, and it must be MAXIMAL: one more cell may not fit in
+           the area left between the two margins */
+        if (xoff + cols * cw > gw || yoff + rows * ch > gh)
+            bad = 2;
+        if ((cols + 1) * cw <= gw - 2 * xoff || (rows + 1) * ch <= gh - 2 * yoff)
+            bad = 3;   /* a cell still fits between the margins -> cols/rows are not maximal */
+        for (int p = xoff; p < xoff + cols * cw && !bad; p++) {
+            int c = iclamp_((p - xoff) / cw, 0, cols - 1);
+            if (c < 0 || c >= cols || p < xoff + c * cw || p >= xoff + (c + 1) * cw)
+                bad = 4;
+        }
+        for (int p = yoff; p < yoff + rows * ch && !bad; p++) {
+            int r = iclamp_((p - yoff) / ch, 0, rows - 1);
+            if (r < 0 || r >= rows || p < yoff + r * ch || p >= yoff + (r + 1) * ch)
+                bad = 5;
+        }
+        CHECK(bad == 0, "every grid pixel maps to the cell drawn under it (padding geometry sweep)");
+    }
+    /* A margin may never eat the last cell: a tiny window still gets a 1x1 grid and an origin that
+       keeps that cell inside the window. */
+    term_grid_geometry(40, 40, 8, 17, 30, &cols, &rows, &xoff, &yoff);
+    CHECK(cols == 1 && rows == 1, "a window smaller than two margins still gets a 1x1 grid");
+    CHECK(xoff + 8 <= 40 && yoff + 17 <= 40,
+          "the clamped margin keeps the single cell inside the window");
+    term_grid_geometry(1, 1, 0, 0, 0, &cols, &rows, &xoff, &yoff);
+    CHECK(cols >= 1 && rows >= 1 && xoff >= 0 && yoff >= 0,
+          "a zero cell size / 1x1 window cannot divide by zero or produce a negative origin");
+    term_grid_geometry(936, 1002, 8, 17, -5, &cols, &rows, &xoff, &yoff);
+    CHECK(xoff == 0 && yoff == 0 && cols == 117 && rows == 58, "a negative margin means no margin");
+
     /* --- reflow: a width change re-wraps, it must never truncate ---------------------- */
     static char lbuf[32][512];
 #define LONG56 "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrst"   /* 56 chars */

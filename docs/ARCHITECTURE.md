@@ -37,8 +37,9 @@ keyboard / pointer (Wayland) -> kb_key / ptr_* -> pty_write()  (or selection/scr
 | `src/render.c` | EGL (platform Wayland) + GL 2.x. Builds one shader + one VAO; per frame: clear, emit the per-cell quads in three back-to-front passes, upload the two atlases when dirty, one draw call. |
 | `src/config.c` | `key = value` config file + defaults + clamping. |
 | `src/main.c` | Wayland shell (xdg-shell), registry binding, xkb keyboard, client-side key repeat (`send_key` + `repeat_start`/`repeat_fire`/`repeat_stop`), pointer (selection, mouse reporting, scrollback wheel), selection endpoint snapping (`sel_cell` + `sel_set_endpoints`), frame-paced redraw, epoll event loop, CLI flags, clipboard data-device. |
-| `tests/test_vt.c` | Unit tests for the parser/grid/selection (incl. sub-cell band geometry and the per-glyph endpoint rule)/alt-screen/emoji-cluster/CSI 3 J/bracketed-paste/reflow model, plus the config-file keys (323 checks). |
-| `tests/dbg.c` | Grid-model invariant checker: asserts the `row[]` permutation + `scroll_off`/`live_off` bounds after scripted scroll, resize and reflow stages (incl. a reflow that overflows a tiny buffer). |
+| `tests/test_vt.c` | Unit tests for the parser/grid/selection (incl. sub-cell band geometry and the per-glyph endpoint rule)/alt-screen/emoji-cluster/CSI 3 J/bracketed-paste/reflow/viewport-height-resize model, plus the config-file keys (364 checks). |
+| `tests/dbg.c` | Grid-model invariant checker: asserts the `row[]` permutation + `scroll_off`/`live_off` bounds after scripted scroll, resize, reflow and zoom stages (incl. a reflow that overflows a tiny buffer). |
+| `tests/cli_test.sh` | Drives the REAL `bin/k-term` to cover `main()`'s argument parser, which no linked test binary can reach (77 checks; run by `make test-cli`, which `make test` depends on). Skips the window-opening checks when `WAYLAND_DISPLAY` is unset. |
 | `build/generated/` | `xdg-shell-client-protocol.h` + `xdg-shell-protocol.c`, produced by `wayland-scanner` from the system `wayland-protocols` XML. Git-ignored. |
 
 ## Event loop (src/main.c)
@@ -272,24 +273,44 @@ not tinted).
 Note: `GL_ARB_vertex_instanced` does not exist — do not gate on it (past bug: the
 instanced path never activated).
 
-### Window geometry: the grid is anchored TOP-LEFT
+### Window geometry: one helper decides the grid size AND its origin
 
-`main.c` sizes the grid with floor division (`cols = cur_w / cell_w`, `rows = cur_h / cell_h`), so the
-window is usually a few pixels larger than the grid. `render_draw` must therefore place the grid so
-that **viewport row y occupies window pixels `[y*cell_h, (y+1)*cell_h)` and column x occupies
-`[x*cell_w, (x+1)*cell_w)`** — i.e. flush with the top-left, leftover pixels at the bottom/right:
+`term_grid_geometry(win_w, win_h, cell_w, cell_h, pad, &cols, &rows, &xoff, &yoff)` (src/vt.c) is the
+only place that turns a window pixel size into a grid size and a pixel origin. THREE users must agree on
+it, and that is why it is one function: `term_size_changed()` (the grid and the PTY size),
+`sel_cell()`/`mouse_cell()` (the pointer -> cell mapping) and `render_draw()` (where the quads go, via
+`render_set_origin()`). Any drift between them puts the highlight on a different glyph than the one
+under the pointer.
+
+Rules it implements, and the invariant they protect:
+
+* `Config.padding` is applied on all four sides, so no glyph sits under a compositor's rounded window
+  corner. `xoff = yoff = pad`.
+* The margin is capped at `(window - one cell) / 2` per side, so a tiny window still gets a 1x1 grid
+  whose cell lies inside the window.
+* `cols = (win_w - 2*xoff) / cell_w` (floor, minimum 1) — the pixels left over by whole cells stay at
+  the **right and bottom**, never at the top/left:
 
 ```
-pad = vh - rows*ch            (clamped >= 0)
+pad = vh - gy - rows*ch       (clamped >= 0; the configured margin PLUS the remainder)
 py  = (rows - 1 - y) * ch + pad        (GL y grows upward)
-px  = x * cw
+px  = gx + x * cw
 ```
 
-This is what makes the pointer->cell mapping exact: `sel_cell()` and `mouse_cell()` (main.c) compute
-`row = ptr_y / cell_h`, `col = ptr_x / cell_w`. Anchor the grid anywhere else and every click, drag
-selection and SGR mouse report lands on the wrong row (past bug, session 30: bottom-left anchoring put
-the leftover strip at the top and shifted the selection by up to a whole row). A pointer inside the
-leftover bottom/right strip simply clamps to the last row/column.
+Viewport row y therefore occupies window pixels `[gy + y*cell_h, gy + (y+1)*cell_h)` and column x
+occupies `[gx + x*cell_w, gx + (x+1)*cell_w)`, and the pointer mapping is exact:
+`row = (ptr_y - gy) / cell_h`, `col = (ptr_x - gx) / cell_w`, clamped to the grid. A pointer in the
+margin clamps to the first row/column, one in the leftover bottom/right strip to the last. Anchor the
+grid anywhere else and every click, drag selection and SGR mouse report lands on the wrong row (past
+bug, session 30: bottom-left anchoring put the leftover strip at the top and shifted the selection by up
+to a whole row). `tests/test_vt.c` sweeps every pixel of the grid area for several window/cell/padding
+combinations and checks that the cell the input formula names is the one the renderer draws there.
+
+The margin is painted by `glClear`, not by a quad, so the clear colour must be the CONFIGURED
+background (`Render.bg`, premultiplied by `Config.opacity`) — `render_init` used to hardcode `DEF_BG`
+there, which showed up as a differently-coloured frame around any window with a custom `background`
+(measured with `wf-recorder -c ffv1`, which records losslessly). `render_draw` clears every frame: the
+margin is outside every quad, and a resized back buffer has no defined contents at all.
 
 ### Selection: cell-granular endpoints, then per-fragment compositing
 
@@ -400,7 +421,7 @@ packer's fit check must account for the shelf WRAP (past bug: heap-buffer-overfl
   instancing state, `shell starts in <dir>`, `ED 3: dropped N scrollback rows`,
   `paste: N bytes, bracketed 0|1` for every clipboard paste, `wl_pointer` interface version, clipboard
   data device, grid size + window/cell geometry
-  (`grid resized to CxR (window WxH px, cell wxh, unused ux x uy px)`), `reflow: OLD -> NEW rows at N
+  (`grid resized to CxR (window WxH px, cell wxh, padding P, unused ux x uy px)`), `reflow: OLD -> NEW rows at N
   cols (K evicted)` for every width change that needed more rows than before, `compositor repeat_info:
   rate R/s delay D ms (k-term uses repeat_delay=… repeat_rate=… from the config)` (what the compositor
   was configured with vs. what K-Term actually uses), `toplevel state: fullscreen F maximized M

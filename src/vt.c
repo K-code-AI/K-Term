@@ -487,23 +487,35 @@ static void grid_reflow(Grid *g, int new_cols, int *slot, int *col)
         klog(L_DEBUG, "reflow: %d -> %d rows at %d cols (%d evicted)", used, kept, new_cols, kept - used);
 }
 
-/* Viewport height change: the rows math, shared by the reflowing and the plain resize. */
-static void grid_resize_rows(Grid *g, int rows)
+/* Viewport height change: the rows math, shared by the reflowing and the plain resize.
+ * cur_slot is the absolute row[] slot of the tracked cell (the cursor), or -1 when the caller has
+ * no cursor to preserve. It decides WHICH end of the viewport loses rows on a shrink, and that is
+ * not a detail: getting it wrong moves the cursor off the line it sits on, the application then
+ * repaints there, and the old copy stays on screen (the zoom leftover-lines bug, ISSUES.md #4). */
+static void grid_resize_rows(Grid *g, int rows, int cur_slot)
 {
     /* Resize math below assumes the slots below the viewport are free, which is only true
        at the live anchor. A resize while scrolled back therefore returns the view to the
        live bottom first (the scrollback content itself is preserved). */
     g->scroll_off = g->live_off;
     if (rows < g->rows) {
-        /* Shrink: the viewport keeps its bottom line, so each line lost is the
-         * viewport's top line. When scrollback has room the window simply slides
-         * down one slot (the dropped line becomes the newest scrollback line in
-         * place). When scrollback is full the oldest line is evicted by
-         * left-rotating the used region; the evicted buffer lands in the last used
-         * slot, where it is cleared and that slot becomes free. */
+        /* Shrink: drop rows from the BOTTOM of the viewport while the cursor still has rows below
+         * it, because everything under the cursor is spare — at a shell prompt it is blank. The
+         * cursor keeps its slot and its viewport row, so the shell's SIGWINCH repaint lands exactly
+         * on its own prompt instead of below it.
+         * Once the cursor is on the viewport's bottom row there is nothing spare under it, so the
+         * viewport's TOP row is given up instead: it becomes the newest scrollback line (the newest
+         * content is what must stay visible), the window slides down one slot, and the cursor's
+         * viewport row drops with it, which keeps it on the same content line. When scrollback is
+         * full the oldest line is evicted by left-rotating the used region; the evicted buffer
+         * lands in the last used slot, where it is cleared and that slot becomes free. */
         while (g->rows > rows) {
             int used = g->scroll_off + g->rows;
-            if (g->scroll_off < sb_limit(g)) {
+            int cy = cur_slot >= 0 ? cur_slot - g->scroll_off : -1;   /* cursor's viewport row */
+            if (cy >= 0 && cy < g->rows - 1) {
+                /* the viewport's bottom row leaves the screen; its slot becomes free */
+                grid_blank_slot(g, used - 1, DEF_BG);
+            } else if (g->scroll_off < sb_limit(g)) {
                 g->scroll_off++;
                 g->live_off = g->scroll_off;
             } else {
@@ -552,10 +564,12 @@ void grid_resize(Grid *g, int rows, int cols, int *slot, int *col)
         grid_reflow(g, cols, slot, col);
     if (rows == g->rows)
         return;
-    grid_resize_rows(g, rows);
+    /* grid_reflow has already moved *slot to the cursor's slot in the re-wrapped grid, so the row
+       math sees the cursor where it actually is now. */
+    grid_resize_rows(g, rows, slot ? *slot : -1);
 }
 
-void grid_resize_plain(Grid *g, int rows, int cols)
+void grid_resize_plain(Grid *g, int rows, int cols, int cur_slot)
 {
     rows = iclamp_(rows, 1, 4096);
     cols = iclamp_(cols, 1, 4096);
@@ -573,7 +587,7 @@ void grid_resize_plain(Grid *g, int rows, int cols)
     }
     if (rows == g->rows)
         return;
-    grid_resize_rows(g, rows);
+    grid_resize_rows(g, rows, cur_slot);
 }
 
 void grid_destroy(Grid *g)
@@ -636,6 +650,33 @@ void term_init(Term *t, int rows, int cols, int scrollback)
     }
 }
 
+void term_grid_geometry(int win_w, int win_h, int cell_w, int cell_h, int pad,
+                        int *cols, int *rows, int *xoff, int *yoff)
+{
+    /* Defensive: a caller with a not-yet-initialized font must not divide by 0, and a compositor
+       can configure a tiny window. */
+    if (cell_w < 1) cell_w = 1;
+    if (cell_h < 1) cell_h = 1;
+    if (win_w < 1)  win_w = 1;
+    if (win_h < 1)  win_h = 1;
+    if (pad < 0)    pad = 0;
+
+    /* A margin may never eat the last whole cell: at most (window - one cell)/2 per side. Without
+       this clamp a 40 px window with padding = 30 would ask for a grid of 0 columns. */
+    int mx = imin_(pad, imax_((win_w - cell_w) / 2, 0));
+    int my = imin_(pad, imax_((win_h - cell_h) / 2, 0));
+
+    /* The offset is the margin itself; the pixels that do not fill a whole cell are left at the
+       right/bottom on purpose. That is the invariant the pointer mapping relies on
+       (col = (ptr_x - xoff) / cell_w clamped to cols-1) and the one render.c documents: moving the
+       remainder to the top/left would make floor((ptr_y - yoff)/cell_h) name the row BELOW the
+       pointer for most of each row's height. */
+    if (xoff) *xoff = mx;
+    if (yoff) *yoff = my;
+    if (cols) *cols = imax_(1, (win_w - 2 * mx) / cell_w);
+    if (rows) *rows = imax_(1, (win_h - 2 * my) / cell_h);
+}
+
 void term_resize(Term *t, int rows, int cols)
 {
     int old_live = t->g.live_off;
@@ -651,7 +692,7 @@ void term_resize(Term *t, int rows, int cols)
            repaints itself, so the alt screen must NOT be re-wrapped (that would scramble vim/htop
            output); the parked main screen, which the user returns to when the app exits, is reflowed
            like any other width change. */
-        grid_resize_plain(&t->g, rows, cols);
+        grid_resize_plain(&t->g, rows, cols, slot);
         grid_resize(&t->alt, rows, cols, NULL, NULL);
     } else {
         grid_resize(&t->g, rows, cols, &slot, &col);

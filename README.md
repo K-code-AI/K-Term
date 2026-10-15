@@ -21,6 +21,8 @@ K-Term is currently a working prototype. It builds cleanly, runs a shell, and ex
 - **Mouse support** — Application mouse reporting, text selection, and clipboard integration.
 - **Key repeat** — Holding a key down repeats it, with the delay and rate set in the configuration file.
 - **Transparency** — Configurable window opacity, subject to compositor support.
+- **Window padding** — A configurable margin around the text, so a compositor's rounded window corners
+  never clip a glyph.
 - **Font zoom** — Increase or decrease the font size without resizing the window.
 - **System clipboard** — Copy and paste use the standard Wayland clipboard, so text copied in K-Term
   pastes into other applications and text copied anywhere else pastes into K-Term.
@@ -54,8 +56,9 @@ Other available targets:
 
 | Command | Description |
 |---|---|
-| `make test` | Build and run the VT unit tests |
-| `make asan` | Run tests with AddressSanitizer and UBSan |
+| `make test` | Build and run the unit tests, the grid-model checker and the command-line tests |
+| `make test-cli` | Run only the command-line tests against `bin/k-term` |
+| `make asan` | Run the tests with AddressSanitizer and UBSan |
 | `make run` | Build and launch K-Term |
 | `make clean` | Remove generated build files |
 
@@ -124,6 +127,7 @@ Settings use a simple `key = value` format.
 | `background` | `#101014` | Background color |
 | `cursor_color` | `#d8d8d8` | Cursor color |
 | `opacity` | `1.0` | Window opacity |
+| `padding` | `8` | Pixels of margin between the window edge and the first/last row and column (`0` puts the text flush against the edge). Applied on all four sides; pixels left over by whole cells still go to the bottom and right |
 | `shell` | Empty | Shell to run; defaults to `$SHELL` |
 | `working_dir` | Empty | Startup directory; defaults to the home directory |
 | `app_id` | `K-Term` | Wayland app ID reported to the compositor (window rules, taskbar grouping) |
