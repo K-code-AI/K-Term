@@ -61,41 +61,13 @@ mono + RGBA8 color emoji) in one draw call per frame. No GUI framework.
   alternate screen is deliberately NOT re-wrapped. A third since session 47: a taller window keeps less
   scrollback than configured (`rcap` is fixed at startup). All three are in ISSUES.md "Known limitations".
 
-## Current Task (session 50 — IN PROGRESS: codebase cleanup + git housekeeping)
-OBJECTIVE (user request 2026-10-15): "cleanup the codebase", and the project is now on GitHub with the
-agent having full git access (verified: `git log` = 2 commits, remote `origin
-https://github.com/K-code-AI/K-Term`, branch `main`; `git status` shows `NextFeature.md` deleted in the
-working tree and `bin/`+`build/` UNTRACKED — the committed `.gitignore` is a generic kernel-module
-template that does NOT ignore them, so the AGENT.md claim that it does was wrong).
+## Current Task
+NONE OPEN — session 50 finished the cleanup pass the user asked for (see the session-50 Progress entry for
+what changed, the verification logs, and the commit/push). `NextFeature.md` no longer exists (both of its
+items were done and confirmed by the user), so there is no work order on disk.
 
-PLANNED STEPS (each verified before the next):
-1. `.gitignore`: replace the template with project-appropriate rules (`bin/`, `build/`, `*.o`, `*.d`);
-   verify `git status --short` no longer lists build artifacts.
-2. `NextFeature.md`: the user deleted it (all its items are done); accept the deletion, and remove the
-   now-dangling `NextFeature #N` references from src/include/tests/docs comments (20 sites).
-3. Dead code: `term_dump()` (declared + defined, never called anywhere; ARCHITECTURE falsely says
-   tests use it) and the `def1` local + `(void)def1;` in `csi_dispatch`.
-4. Latent warnings: `src/vt.c` `osc_end` `s = ""` trips `-Wdiscarded-qualifiers`; re-audit every source
-   under a stricter flag set (`-Wshadow -Wcast-qual -Wwrite-strings -Wformat=2 -Wdiscarded-qualifiers`)
-   and fix anything in project code (generated bindings excluded).
-5. Docs: AGENT.md git facts + Project Files + the false .gitignore claim; ARCHITECTURE `term_dump` line.
-6. Re-verify: `make clean && make` (0 warnings), `make test` (323 checks / 0 failures + MODEL OK),
-   `make asan`, and a live `-d` smoke run. NO behaviour change is intended, so the check count must
-   stay 323.
-7. Commit the cleanup and push to `origin/main` (the user granted git access).
-
-EXPECTED OUTCOME: same behaviour and same 323 checks, a tree with no dead code, no dangling references,
-no warnings under stricter flags, a correct .gitignore, and everything committed + pushed.
-
-PREVIOUS TASK (session 49) — NOTHING OPEN. `NextFeature.md` #1 and #2 are both implemented AND confirmed by the user, the
-black-window regression and the heavy-output segfault are fixed and confirmed, and the clipboard report was
-investigated and closed without a code change (it does not reproduce; the user confirms both directions
-work). The docs pass the user asked for is done: ISSUES.md Open #1 moved to "Fixed", the clipboard facts
-and the `copy_on_release` behaviour documented in ISSUES.md / README.md / docs/ARCHITECTURE.md, and the
-build re-verified afterwards (see Current Status and the session 49 entry).
-
-NEXT ACTION: ask the user what to build next — `NextFeature.md` is empty after #2. Do not start a feature
-without their go-ahead. Two things worth offering (both are options, not open bugs):
+NEXT ACTION: ask the user what to build next; do not start a feature without their go-ahead. Two things
+worth offering (both options, not open bugs):
   * a `k-term` ASan target (only the tests have one; the hand-built one found the `row[rcap]` overrun);
   * the `wl_data_offer_accept()` + multi-mime clipboard hardening, which niri does not need but a stricter
     compositor might (ISSUES.md "Known limitations").
@@ -486,8 +458,21 @@ without their go-ahead. Two things worth offering (both are options, not open bu
   VERIFIED AGAIN after the doc pass: live `timeout -k 2 15 ./bin/k-term -d -e 'echo smoke-ok; seq 1 200;
   clear; echo done'` -> exit 0, 0 error/fail lines, logging `app_id: K-Term`, `grid resized to 117x62`,
   `ED 3: dropped 144 scrollback rows`, `k-term exiting` (`/tmp/s50_live.log`).
-  NEXT ACTION: step 7 — `git add -A`, one cleanup commit, `git push origin main`, then record the commit
-  hash here and set Current Task to done.
+  DONE (step 6+7, commit + push): `git add -A` + one commit. The FIRST push was REJECTED — the user had
+  already deleted `NextFeature.md` on GitHub (`89ebfd4`, `b2cf45c`), so the histories had diverged
+  (local 1 ahead, remote 2 ahead). `git pull --rebase origin main` replayed the cleanup on top of
+  `b2cf45c` with NO conflict (both sides deleted the same file), and the tree was re-verified after the
+  rebase (`make clean && make` 0 warnings `/tmp/s50_p_build.log`, `make test` and `make asan` both
+  `323 checks, 0 failures` + `MODEL OK (0 problems)`). PUSHED: `b2cf45c..6b471df main -> main`, so
+  `origin/main` == `main` == `6b471df "Cleanup: dead code, stale references, stricter warnings,
+  .gitignore"`; `git status -sb` shows no ahead/behind and a clean tree. PITFALL: always `git fetch` +
+  check `git rev-list --left-right --count origin/main...main` before pushing — the user commits on
+  GitHub too.
+  SESSION 50 RESULT: cleanup complete — dead code gone (`term_dump`), no dangling `NextFeature` reference
+  anywhere in src/include/tests/docs, the tree is warning-free under a stricter `WARN` set now enforced by
+  the Makefile, `.gitignore` actually ignores `bin/`+`build/`, docs match reality, and everything is
+  committed and pushed. NO behaviour change and NO test was added or removed (323 before, 323 after).
+  NEXT ACTION: nothing open — ask the user what to build next.
 
 ## Environment (verified 2026-10-12; re-confirmed live 2026-10-14 session 38; compositor state re-checked
 2026-10-15 sessions 47, 48 and 49)
@@ -646,6 +631,17 @@ without their go-ahead. Two things worth offering (both are options, not open bu
   `copy_on_release = 0` default (a drag-release does not copy). ISSUES.md Open #1 (fullscreen) moved to
   Fixed on the user's confirmation; the clipboard facts and the mime/`accept()` observations are now
   documented in ISSUES.md, README.md and docs/ARCHITECTURE.md.
+- **2026-10-15, session 50** — CLEANUP + git. The project is on GitHub (`origin
+  https://github.com/K-code-AI/K-Term`, branch `main`, push access granted). Removed the only dead
+  function (`term_dump`), the misleading `(void)def1;` cast, and every dangling `NextFeature #N` comment
+  reference (that file is gone — the user deleted it on GitHub and the deletion is now in the tree).
+  `osc_end()` made const-correct; four `-Wshadow` collisions in `tests/test_vt.c` renamed; the Makefile
+  now builds with `WARN = -Wall -Wextra -Wshadow -Wwrite-strings -Wformat=2 -Wdiscarded-qualifiers`
+  (the whole tree is clean under it). `.gitignore` was a kernel-module template that ignored neither
+  `bin/` nor `build/` — replaced with project rules. ISSUES.md gained the "window title is never pushed
+  to the compositor" limitation. Committed and pushed as `6b471df` after a `git pull --rebase` over the
+  user's own GitHub commits. No behaviour change: 323 checks before and after, `make`/`make test`/
+  `make asan`/live run all clean.
 
 ## Next Steps
 1. **Nothing is pending verification** — the user confirmed the black-window fix, the heavy-output segfault
