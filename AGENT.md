@@ -72,7 +72,9 @@ mono + RGBA8 color emoji) in one draw call per frame. No GUI framework.
   scrollback than configured (`rcap` is fixed at startup). All three are in ISSUES.md "Known limitations".
 
 ## Current Task
-DONE (session 55) — documentation accuracy pass + commit, at the user's request ("Cleanup + commit").
+DONE (session 55) — documentation accuracy pass + commit + push, at the user's request ("Cleanup +
+commit"). Everything from sessions 52-54 is now in the repo: commit `19c8bd3`, pushed to `origin/main`
+(`b451d87..19c8bd3`), tree clean and level with the remote.
 What was stale and is now corrected: the padding clear-colour item sat in ISSUES.md "Open" as NOT
 VERIFIED although the user had confirmed padding works in their real window; the CLI-coverage item was
 still listed as "Fix in progress" although `tests/cli_test.sh` + `make test-cli` are in the tree and
@@ -724,9 +726,19 @@ message; committed and pushed as `b451d87`.
   ALSO FIXED (structure, not content): the sessions 52-55 Progress entries had been sitting AFTER `##
   History` since session 48's reordering, so the journal read as if they were history entries; they now
   live under `### Progress` in chronological order, and History gained one era line for sessions 52-55.
-  NEXT ACTION: commit + push this state, then take on ISSUES.md Open #1 (the second-instance
-  `glTexImage2D 0x505` + SIGSEGV) — the only crash left — using the source and the tests, NOT screen
-  recording (the user's standing instruction: they verify anything visual themselves).
+  DONE (commit + push): `git fetch` first (the user commits on GitHub too) -> `origin/main` and `main`
+  were level (0/0), so no rebase was needed. `git add -A` + one commit `19c8bd3 "Zoom fix, window padding,
+  CLI test suite; docs synced"` (13 files: the session 52-54 source/test work plus this session's doc
+  pass; `tests/cli_test.sh` added and made executable). PUSHED: `b451d87..19c8bd3 main -> main`, and
+  `git status -sb` shows `## main...origin/main` with no ahead/behind and a clean tree.
+  VERIFIED IMMEDIATELY BEFORE THE COMMIT (docs-only changes, but re-measured anyway): `make clean && make`
+  exit 0 / 0 warnings (/tmp/s55_b2.log); `make test` -> `364 checks, 0 failures` + `MODEL OK (0 problems)`
+  + `CLI: 77 checks, 0 failures, 0 skipped` (/tmp/s55_t2.log); `make asan` -> `364 checks, 0 failures` +
+  `MODEL OK (0 problems)`, no sanitizer report (/tmp/s55_a2.log).
+  NEXT ACTION: ISSUES.md Open #1 — the second-instance `atlas glTexImage2D failed: 0x505` + SIGSEGV, the
+  only crash left. Work from the source and a headless harness, NOT screen recording (the user's standing
+  instruction: they verify anything visual themselves). Open #2 (`eglSwapBuffers failed: 0x3000` on
+  launch) is the smaller one after that.
 
 ## Environment (verified 2026-10-12; re-confirmed live 2026-10-14 session 38; compositor state re-checked
 2026-10-15 sessions 47, 48, 49 and 55)
