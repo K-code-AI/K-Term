@@ -87,7 +87,7 @@ The default startup directory is the user's home directory. You can change it in
 |---|---|---|
 | `-e COMMAND` | `--exec COMMAND` | Run a command instead of the default shell |
 | `-w DIR` | `--workingdir DIR` | Set the startup directory for this launch |
-| `-C FILE` | `--config FILE` | Specify a configuration file |
+| `-c FILE` | `--config FILE` | Specify a configuration file |
 | `-d` | `--debug` | Enable debug logging |
 | `-v` | `--version` | Print the version and exit |
 | `-h` | `--help` | Show the option list and exit |
@@ -96,8 +96,8 @@ Long options also accept the `--name=VALUE` form (for example `--workingdir=/tmp
 
 Command-line options take precedence over configuration values. Everything that describes how the
 terminal looks — font, font size, columns, rows, scrollback, colours, opacity — is configured in the
-configuration file only; passing the old `-f`, `-s`, `-c`, `-r` or `-o` flags prints a message naming
-the setting to use instead.
+configuration file only. Any option K-Term does not accept is rejected with
+`k-term: unknown option '<flag>'` followed by the option list above.
 
 ## Configuration
 
@@ -107,7 +107,7 @@ The default configuration file is:
 ~/.config/k-term/k-term.conf
 ```
 
-If `XDG_CONFIG_HOME` is set, K-Term uses `$XDG_CONFIG_HOME/k-term/k-term.conf` instead. Use `-C FILE` to specify another location.
+If `XDG_CONFIG_HOME` is set, K-Term uses `$XDG_CONFIG_HOME/k-term/k-term.conf` instead. Use `-c FILE` to specify another location.
 
 Settings use a simple `key = value` format.
 

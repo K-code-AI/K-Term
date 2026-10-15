@@ -1260,23 +1260,15 @@ static void wayland_destroy(void)
 /* The launch surface is deliberately small. Everything that describes how the
    terminal LOOKS (font, size, grid, colours, opacity) is a persistent preference and lives in the
    config file; the flags that stay are the per-launch ones (what to run, where to start, which config
-   to read, debug). The removed flags are still RECOGNISED so the user is told where the setting went
-   instead of getting a bare usage line. */
-static const struct { const char *flag, *key; } retired_flags[] = {
-    { "-f", "font" },
-    { "-s", "font_size" },
-    { "-c", "cols" },
-    { "-r", "rows" },
-    { "-o", "opacity" },
-};
-
+   to read, debug). Flags that were dropped in the past are NOT special-cased: they are simply unknown
+   options, and an unknown option produces one generic message plus the option list. */
 static void usage(const char *argv0, FILE *out)
 {
     fprintf(out,
             "usage: %s [OPTION]...\n\n"
             "  -e, --exec COMMAND      run COMMAND instead of the default shell\n"
             "  -w, --workingdir DIR    start the shell in DIR (default: $HOME)\n"
-            "  -C, --config FILE       read FILE instead of ~/.config/k-term/k-term.conf\n"
+            "  -c, --config FILE       read FILE instead of ~/.config/k-term/k-term.conf\n"
             "  -d, --debug             enable debug logging\n"
             "  -v, --version           print the version and exit\n"
             "  -h, --help              show this help and exit\n\n"
@@ -1338,24 +1330,15 @@ int main(int argc, char **argv)
             if (!v)
                 return 1;
             opt_wdir = v;   /* one argv element: spaces/special chars need no extra work */
-        } else if (!strcmp(a, "-C") || longopt(a, "--config", &val)) {
+        } else if (!strcmp(a, "-c") || longopt(a, "--config", &val)) {
             const char *v = opt_value(val, argv, &i, argc, a);
             if (!v)
                 return 1;
             opt_config = v;
         } else {
-            int known = 0;
-            for (size_t k = 0; k < sizeof(retired_flags) / sizeof(retired_flags[0]); k++) {
-                if (strcmp(a, retired_flags[k].flag))
-                    continue;
-                fprintf(stderr,
-                        "k-term: %s is not a command-line option any more; set '%s' in the "
-                        "config file (-C FILE picks another one)\n", a, retired_flags[k].key);
-                known = 1;
-                break;
-            }
-            if (!known)
-                fprintf(stderr, "k-term: unknown option '%s'\n", a);
+            /* One generic path for every option K-Term does not take, including the flags that were
+               dropped in the past: no per-flag explanation, just the message and the option list. */
+            fprintf(stderr, "k-term: unknown option '%s'\n", a);
             usage(argv[0], stderr);
             return 1;
         }

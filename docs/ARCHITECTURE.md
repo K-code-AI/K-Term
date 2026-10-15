@@ -226,7 +226,7 @@ grid is still reflowed, so the text you return to is correct.
 
 ## Configuration file (src/config.c)
 
-`key = value`, one per line, read once at startup from `-C FILE`, else
+`key = value`, one per line, read once at startup from `-c FILE`, else
 `$XDG_CONFIG_HOME/k-term/k-term.conf`, else `$HOME/.config/k-term/k-term.conf`. CLI flags are applied
 AFTER the file, so they win; `-w DIR` affects only that launch and never writes the file back.
 

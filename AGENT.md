@@ -10,7 +10,7 @@ K-Term is a lightweight Linux terminal emulator for Wayland written in C: native
 (xdg-shell) + PTY shell + VT/ANSI parser + EGL/OpenGL text rendering from two glyph atlases (alpha8
 mono + RGBA8 color emoji) in one draw call per frame. No GUI framework.
 
-## Current Status (build/test/asan/live re-verified 2026-10-15, session 50)
+## Current Status (build/test/asan/live re-verified 2026-10-15, session 51)
 - Clean tree: `make` -> zero warnings under the Makefile's `WARN` set (`-Wall -Wextra -Wshadow
   -Wwrite-strings -Wformat=2 -Wdiscarded-qualifiers`, tightened in session 50; the tree is also clean
   under `-Wcast-qual -Wmissing-prototypes -Wstrict-prototypes -Wold-style-definition -Wredundant-decls`
@@ -18,10 +18,11 @@ mono + RGBA8 color emoji) in one draw call per frame. No GUI framework.
   `make test` -> `323 checks, 0 failures` +
   `MODEL OK (0 problems)`; `make asan` -> same, with NO LeakSanitizer/UBSan report. No temporary probe or
   experiment remains in the tree (`grep -rn "TEMPORARY|PROBE|EXPERIMENT|KTERM_S47" src/ include/ tests/`
-  -> nothing). Re-run from a clean tree by session 50 (`make clean && make` 0 warnings, `make test`,
-  `make asan`, a live `-d` run — `/tmp/s50_b3.log`, `/tmp/s50_t3.log`, `/tmp/s50_a3.log`,
-  `/tmp/s50_live.log`); README's flags table and
-  its 17 settings rows match `src/main.c` and `src/config.c`.
+  -> nothing). Re-run from a clean tree by session 51 (`make clean && make` 0 warnings, `make test`,
+  `make asan`, a live `-d` run and a 31-check CLI harness — `/tmp/s51_build.log`, `/tmp/s51_test.log`,
+  `/tmp/s51_asan.log`, `/tmp/s51_live.log`, `/tmp/s51_cli.sh`); README's flags table (`-e -w -c -d -v -h`,
+  the config flag became lower-case `-c` in session 51) and its 17 settings rows match `src/main.c` and
+  `src/config.c`.
 - **The user-reported black window / no input is FIXED and verified live** (session 47; re-verified live
   by session 48, including a wf-recorder frame diff). Root cause and
   evidence: ISSUES.md "Fixed: Black window, no prompt, no input". Short version: `eglSwapBuffers` was
@@ -62,9 +63,7 @@ mono + RGBA8 color emoji) in one draw call per frame. No GUI framework.
   scrollback than configured (`rcap` is fixed at startup). All three are in ISSUES.md "Known limitations".
 
 ## Current Task
-NONE OPEN — session 50 finished the cleanup pass the user asked for (see the session-50 Progress entry for
-what changed, the verification logs, and the commit/push). `NextFeature.md` no longer exists (both of its
-items were done and confirmed by the user), so there is no work order on disk.
+NONE OPEN (session 51 done — the user's CLI change is implemented, verified and pushed).
 
 NEXT ACTION: ask the user what to build next; do not start a feature without their go-ahead. Two things
 worth offering (both options, not open bugs):
@@ -474,6 +473,35 @@ worth offering (both options, not open bugs):
   committed and pushed. NO behaviour change and NO test was added or removed (323 before, 323 after).
   NEXT ACTION: nothing open — ask the user what to build next.
 
+- 2026-10-15 (session 51, the user's CLI request: `-C` -> `-c`, and no error message about removed flags).
+  REQUEST: "change the -C launch argument to -c, no need to use the capital one"; "there shouldn't be
+  error message referencing Arguments we removed in the past"; "when using an invalid argument it should
+  just say the same invalid argument with the help print".
+  src/main.c: (a) the config flag is now `-c` (`--config` and `--config=FILE` unchanged) — note `-c` had
+  been one of the RETIRED flags (it used to mean `cols`), so the two changes fit together: the name is
+  free once the retirement table goes. (b) `retired_flags[]` and its lookup loop DELETED — the table that
+  printed "`-o` is not a command-line option any more; set 'opacity' in the config file (-C FILE picks
+  another one)". (c) ONE generic path for everything else: `k-term: unknown option '<arg>'` + `usage()`
+  on stderr, exit 1. `-h`/`--help` still print the option list to stdout with exit 0, now listing
+  `-c, --config FILE`.
+  VERIFIED by running the binary (`.scratch`-style harness /tmp/s51_cli.sh, 31 checks, 0 failures —
+  argv is NOT unit-tested, main.c is not linked into bin/test_vt, so the binary is the only honest check):
+  `-h` exit 0 lists `-c` and no `-C`; `--help` identical; `-c FILE` really loads that file (`app_id:
+  cli-lower-c` logged and `font_size = 30` applied, cell 18x34); `--config=FILE` and `--config FILE` both
+  still work; `-C FILE` -> `k-term: unknown option '-C'` + usage, exit 1; `-f -s -r -o` each produce the
+  IDENTICAL generic message and no "any more" text; `--bogus` the same; `-c` with no argument ->
+  `k-term: -c needs an argument`, exit 1; and `-d` still beats `log = 0` in the config (the session-43
+  precedence fix survives). Full re-verification: `make clean && make` 0 warnings (/tmp/s51_build.log),
+  `make test` 323/0 + MODEL OK (/tmp/s51_test.log), `make asan` 323/0 + MODEL OK with no sanitizer report
+  (/tmp/s51_asan.log), live `-d -e 'echo smoke-ok; seq 1 200; clear'` exit 0 with 0 error lines
+  (/tmp/s51_live.log). Test count unchanged (323) — no test covers argv.
+  DOCS: README flags table + the `-c FILE` config-location sentence + the paragraph that used to promise
+  "passing the old `-f`, `-s`, `-c`, `-r` or `-o` flags prints a message naming the setting" (now: any
+  option K-Term does not accept is rejected with `k-term: unknown option '<flag>'` plus the option list);
+  docs/ARCHITECTURE.md's config-file section (`-c FILE`); ISSUES.md's session-43 `-d` entry annotated with
+  "the config flag is `-c` since session 51" so its historical `-C <conf>` command is not misread.
+  NEXT ACTION: nothing open — ask the user what to build next.
+
 ## Environment (verified 2026-10-12; re-confirmed live 2026-10-14 session 38; compositor state re-checked
 2026-10-15 sessions 47, 48 and 49)
 - Gentoo Linux, kernel 6.18.54, gcc 15.3.0, pkg-config 3.0.7.
@@ -606,7 +634,8 @@ worth offering (both options, not open bugs):
 - **2026-10-15, sessions 44-45** — `NextFeature.md` #1-#3: the default `app_id` is now `K-Term` (one
   `DEF_APP_ID` macro where the literal had been repeated four times); the CLI surface was cut back to
   `-e -w -C -d -v -h` with long forms and a message naming the config key for every retired flag
-  (appearance settings are config-only); `copy_on_release` became a config toggle (default OFF);
+  (appearance settings are config-only; session 51 deleted that retired-flag messaging and renamed `-C`
+  to `-c`); `copy_on_release` became a config toggle (default OFF);
   CLIENT-SIDE KEY REPEAT was implemented (`krfd` timerfd + `send_key`'s repeatability result +
   `repeat_delay`/`repeat_rate` in the config) and the user confirmed it in the real window. Tests
   292 -> 301 -> 312. Session 45 also found the fullscreen freeze's root cause (`solicit_frame()` arming a
@@ -642,13 +671,21 @@ worth offering (both options, not open bugs):
   to the compositor" limitation. Committed and pushed as `6b471df` after a `git pull --rebase` over the
   user's own GitHub commits. No behaviour change: 323 checks before and after, `make`/`make test`/
   `make asan`/live run all clean.
+- **2026-10-15, session 51** — CLI surface at the user's request: the config flag is `-c` (was `-C`),
+  `retired_flags[]` and its "this flag is not a command-line option any more" messaging DELETED, and every
+  unknown option now prints one generic `k-term: unknown option '<arg>'` plus the option list and exits 1.
+  Verified by running the binary (31 CLI checks, 0 failures — argv is not unit-tested, main.c is not
+  linked into bin/test_vt). README / docs/ARCHITECTURE.md / ISSUES.md synced. 323 checks unchanged.
 
 ## Next Steps
 1. **Nothing is pending verification** — the user confirmed the black-window fix, the heavy-output segfault
    fix and the old `NextFeature.md` #2 (fullscreen) in their real window, and confirmed clipboard interop
    both ways. `NextFeature.md` itself is DELETED (session 50: both of its items are done and confirmed),
    so there is no work order on disk — ask the user what to build next.
-2. Housekeeping options: make the ASan build of the `k-term` binary a real Makefile target (only the
+2. Housekeeping options: a CLI regression script checked into `tests/` (the option surface is currently
+   verified only by the throwaway `/tmp/s51_cli.sh` — 31 checks over the real binary; argv cannot be
+   unit-tested the way vt.c is, because main.c is not linked into `bin/test_vt`, so a `make test-cli`
+   target would be the honest way to keep it covered); make the ASan build of the `k-term` binary a real Makefile target (only the
    tests have one; the hand-built one in `.scratch/kterm_asan` found the `row[rcap]` overrun, so a
    `make asan` that also covers the Wayland/EGL path would pay off — it would also cover the heap-grown
    `paste_buf`); idle-frame

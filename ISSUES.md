@@ -210,7 +210,7 @@ Not bugs — current behaviour the user has to know about. (Root causes of actua
   that is applied AFTER `config_load()`. Verified by session 43 with `.scratch/cli_test.sh` (17 cases):
   `-C <conf> -e true -d` logs `app_id: cli-test-id` and really applies `font_size = 30` (cell 18x34) while
   the config's `log = 1` no longer suppresses the debug lines, and the same config without `-d` produces 0
-  log lines.
+  log lines. (The config flag is `-c` since session 51; `-C` was its spelling at the time.)
 - **`opacity` made the window fully transparent instead of partly** (session 41, found while making the
   documented transparency feature actually work). Reproduce: `./bin/k-term -d -o 0.5` -> the window is
   completely see-through; only `-o 1` looked right. Root cause: `render_init` clamped the value with
