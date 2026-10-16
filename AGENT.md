@@ -16,7 +16,7 @@ Wayland terminal emulator in C. xdg-shell window + PTY shell + VT/ANSI parser + 
 glyph atlases (alpha8 mono, RGBA8 color emoji), 1 draw call/frame. In-window multiplexing: N sessions per
 window, tab bar, side-by-side panes. No GUI framework.
 
-## Current Status (build/test/asan re-verified 2026-10-17, session 66)
+## Current Status (build/test/asan re-verified 2026-10-17, session 67)
 
 - Clean tree: `make` exit 0, **0 warnings** under `WARN` (`-Wall -Wextra -Wshadow -Wwrite-strings
   -Wformat=2 -Wdiscarded-qualifiers`). `make test` -> **501 checks, 0 failures** + **MODEL OK (0 problems)** +
@@ -44,17 +44,15 @@ window, tab bar, side-by-side panes. No GUI framework.
 
 ## Current Task
 
-**Nothing in progress** (s66 closed: ISSUES.md gutted to current+verified info only — see the s66 journal
-entry). ISSUES.md is now 100 lines / 1149 words, from 673 / 9059.
+**Nothing in progress** (s67 closed: both source loose ends done — see the s67 journal entry).
 
-Two loose ends for the user to decide, both source changes, so not done unasked:
-
-- `src/font.c` lines 529 and 794 still claim a "128px" emoji strike and the fallback constant at line 574 is
-  128, but the installed NotoColorEmoji.ttf has a single 56px strike (measured).
-- 6 code comments still cite ISSUES.md sections that `a59e7ae` deleted: `ISSUES.md #4` at
-  `include/kai-term/kai-term.h:192`, `src/vt.c:494`, `tests/dbg.c:158`, `tests/test_vt.c:438`, and
-  `ISSUES.md "Fixed"` at `src/main.c:187` and `src/main.c:647`. They now point at nothing — the root causes
-  they mean are in `git show d5afe4a:ISSUES.md`.
+- 6 dangling `ISSUES.md` citations removed from kai-term.h / vt.c / dbg.c / test_vt.c / main.c; the comments
+  state the mechanism themselves now. `grep -rn ISSUES src/ include/ tests/` finds no dead pointer.
+- Emoji-strike comments in font.c + render.c now attribute 136x128 / 128px to the installed font, and the
+  hard-coded `color_px = 128` fallback is `f->px`. **The premise that these were stale was false**: the strike
+  really is 136x128 px and `color_px == 128` here (FreeType probe + the app's own `-d` line). The bad "56px"
+  figure came from reading CBLC's `bitmapSize` (a byte count) as a pixel size; ENVIRONMENT.md carried it and
+  has been corrected.
 
 NEXT ACTION: pick from "Next Steps" (housekeeping — no bug is open), or file a problem with a reproduction.
 
@@ -183,6 +181,9 @@ NEXT ACTION: pick from "Next Steps" (housekeeping — no bug is open), or file a
   ISSUES.md now states the behaviour with no hard-coded number and the measurement went to ENVIRONMENT.md
   ("Fonts", outside the repo). The two stale `font.c` comments + the 128 fallback constant (font.c:574) are
   a source change — left for the user to approve.
+  **CORRECTED IN s67 — the 56px figure above is wrong.** It came from reading CBLC's `bitmapSize` (a BYTE
+  count) as a pixel size. FreeType and the running app both report the strike as 136x128 px /
+  `color_px = 128`, so font.c was right and ENVIRONMENT.md was polluted with the bad number.
   Docs only — no source, header, Makefile or test file touched. `make`/`make test`/`make asan` re-run from a
   clean tree afterwards; numbers in Current Status are those runs.
 
@@ -200,6 +201,61 @@ NEXT ACTION: pick from "Next Steps" (housekeeping — no bug is open), or file a
   code side is still dangling — a source change, so left for the user.
   Dating note: `date` on this host reports 2026-10-16 while sessions 64-66 are dated 2026-10-17 — journal
   convention and the host clock disagree. Keep the journal's convention; do not rewrite past entries.
+- **2026-10-17, s67 — objective: clear the two source loose ends, then make origin/main match local main.**
+  User approved both source fixes (font.c emoji-stale claims + the 6 dangling ISSUES.md refs in code) and
+  asked for the remote to fit the local tree (= push, `git fetch` first).
+  MEASURED BEFORE TOUCHING CODE — and the first loose end turned out to be based on a FALSE premise:
+  `.scratch/s67/facts.c` (FreeType, the API the code actually uses) on
+  `/usr/share/fonts/noto-emoji/NotoColorEmoji.ttf`: `FT_IS_SCALABLE=0`, `num_fixed_sizes=1`,
+  `available_sizes[0] = 136x128`, after `FT_Select_Size(0)`: `metrics.height/64 = 128`, `y_ppem = 109`,
+  `unitsPerEm = 0`; loaded color bitmaps really are 136x128 px (U+1F600 gid 883, U+1F1FA also 136x128).
+  The app agrees: `./bin/kai-term -d -e true` logs `color emoji: … (128px strike)`, i.e. `f->color_px == 128`.
+  So font.c's "128px strike" / "136x128 px per glyph" comments and its 128 fallback are CORRECT for this
+  box, and the s66 entry's "single 56px strike" is WRONG. Where 56 comes from: a hand-rolled CBLC parse read
+  a **byte-count** field as a pixel size. Re-parsing CBLC properly (header is 8 bytes: major 3, minor 0,
+  numSizes 1; BitmapSize record at +8) gives `bitmapSize = 56` BYTES of index data, `bitmapOffset = 16000`,
+  `indexFormat = 3` — 56 is a size in bytes, never a px dimension. Evidence: `.scratch/s67/facts.c`.
+  CONSEQUENCE: the stale host fact is in ENVIRONMENT.md ("Fonts", outside the repo) and in the s66 journal
+  entry, not in font.c. Both get corrected; font.c keeps its numbers but stops asserting them as constants.
+  PLANNED STEPS: (1) font.c — attribute the px figures to the installed font + replace the magic 128 fallback
+  with `f->px` (font_size is clamped 6..256 at config.c:288, so it is always > 0; the branch is unreachable
+  here since metrics.height/64 = 128 and y_ppem = 109 both > 0). (2) render.c:761 — same host-specific
+  "128px on this box" claim. (3) the 6 dangling ISSUES.md citations in kai-term.h/vt.c/dbg.c/test_vt.c/main.c
+  -> comments state the mechanism (they already do) and stop pointing at deleted sections. (4) ENVIRONMENT.md
+  Fonts section corrected. (5) `make`/`make test`/`make asan` from a clean tree + the `-d` emoji line re-read.
+  (6) commit, `git fetch`, push so origin/main == local main.
+  EXPECTED OUTCOME: no behaviour change (comments + one unreachable-branch fallback), 0 warnings, same test
+  counts, and a remote that matches the local tree.
+  DONE (1) src/font.c: 4 comment sites now attribute the figures to the installed font instead of stating
+  them as properties of "Noto Color Emoji" (18, 528-530, 568-571, 796-800), and the magic `f->color_px = 128`
+  fallback became `f->px` with the reason written next to it (color_px is the `cell_h / color_px` divisor, so
+  it must stay > 0; font_size is clamped 6..256 at config.c:288, so f->px is; measured unreachable here).
+  Mistake made and fixed in-session: the font.c edit first produced `(int)face->size->metrics.y_ppem);` — a
+  stray paren — caught by compiling right after the edit (`make` exit 0, 0 warnings afterwards).
+  DONE (2) include/kai-term/kai-term.h:192 — dead `(ISSUES.md #4)` citation dropped; the comment already
+  states the mechanism, so it now ends `(the zoom leftover-lines bug)`.
+  (Second in-session slip: this very append replaced the paragraph above instead of following it — the journal
+  edit anchored on the wrong line. Re-added. Anchor on the LAST line of the entry, not on a line you mean to
+  keep above it.)
+  DONE (3) src/render.c:761 — "(128px strike on this box)" -> the strike's own pixel height as the font
+  reports it, 128 named as the installed font's value.
+  DONE (4) the 6 dangling ISSUES.md citations removed: kai-term.h:192, src/vt.c:494, tests/dbg.c:158,
+  tests/test_vt.c:438 (all four just drop the dead `ISSUES.md #4` tag — each comment already states the
+  mechanism, so the citation added nothing), src/main.c:187 and src/main.c:647 (now say the root causes are in
+  git history, not in ISSUES.md). No git SHAs put in source comments — they age; the mechanism is stated
+  inline instead.
+  CHECKED after: `grep -rn ISSUES src/ include/ tests/ Makefile` -> only the two new "not in ISSUES.md"
+  sentences; `grep -n 128 src/font.c src/render.c` -> every hit attributed to the installed font.
+  DONE (5) `/home/kaida/Project/ENVIRONMENT.md` "Fonts" (outside the repo) rewritten with the measured
+  numbers and a new trap entry: do not parse CBLC by hand, `bitmapSize` is a byte count; read the font through
+  FreeType or read what the program logs. This is where the false 56px fact lived and it is what would have
+  re-infected the next session.
+  VERIFIED from a clean tree (`make clean` first), exact commands and results:
+  `make` -> exit 0, 0 warnings, 0 errors; `make test` -> exit 0, 501 checks 0 failures + MODEL OK (0 problems)
+  + CLI: 86 checks 0 failures 0 skipped; `make asan` -> exit 0, 501/0 + MODEL OK, 0 lines matching
+  AddressSanitizer|runtime error|LeakSanitizer|SUMMARY. Behaviour unchanged, and proven rather than assumed:
+  `timeout 6 ./bin/kai-term -d -e true` still logs `color emoji: … (128px strike)` with 0 warn/error lines,
+  so the primary metrics path is taken and the rewritten fallback is not reached on this box.
 
 ## Next Steps
 
