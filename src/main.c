@@ -184,7 +184,8 @@ static void wl_flush(void)
 }
 
 /* ---- frame pacing -------------------------------------------------------------
-   Three rules, each the result of a real freeze here (ISSUES.md "Fixed"):
+   Three rules, each the result of a real freeze here (the root causes are in git history, not in
+   ISSUES.md):
    1. A wl_surface_frame callback is armed ONLY together with a commit that attaches a NEW buffer,
       i.e. only from redraw() after a successful swap. A damage-driven compositor runs a render pass
       only when something on the output changed, and frame callbacks are delivered during such a pass,
@@ -644,8 +645,8 @@ static void xdg_surface_configure(void *d, struct xdg_surface *xs, uint32_t seri
         W.first_done = 1;
         W.dirty = 1;
     }
-    /* Two rules, both learned the hard way (ISSUES.md: the fullscreen freeze and the black-window
-       regression):
+    /* Two rules, both learned the hard way (the fullscreen freeze and the black-window regression;
+       their root causes are in git history, not in ISSUES.md):
        1. The FIRST configure must attach a buffer right here. A window is not mapped until a commit
           carries a buffer, and a client that waits for a frame callback before drawing the first frame
           never maps and never gets that callback. Nothing is in flight yet, so this swap cannot wait

@@ -155,7 +155,7 @@ int main(void){
     chk("growthen-shrink");
     for (int i = 1; i <= 40; i++) { char l[32]; snprintf(l, sizeof l, "H%02d\r\n", i); feed(l); }
     chk("growthen-scroll2");
-    /* SHRINK with a cursor to preserve (the zoom leftover-lines bug, ISSUES.md #4). The viewport now
+    /* SHRINK with a cursor to preserve (the zoom leftover-lines bug). The viewport now
        gives up its BOTTOM rows while the cursor has rows below it, which blanks a slot IN PLACE
        instead of sliding the window down one slot — a different code path than the old top-row-into-
        scrollback one, so row[] must be re-checked as a NULL-free, duplicate-free permutation for

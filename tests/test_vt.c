@@ -435,7 +435,7 @@ int main(void)
     CHECK(row[0] == '6', "shrink keeps bottom line (no scrollback)");
 
     /* --- a height SHRINK must never move the cursor off its own line ---------------------------
-       The zoom bug (ISSUES.md #4): zooming changes cols AND rows at once. The old shrink always gave
+       The zoom bug: zooming changes cols AND rows at once. The old shrink always gave
        up the viewport's TOP row, so a shrink larger than the number of rows above the cursor pushed
        the cursor's own line into scrollback; term_resize then clamped cy to 0, the shell repainted
        its prompt at that clamped cursor, and every zoom step left one stale prompt and a blank gap.

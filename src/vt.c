@@ -491,7 +491,7 @@ static void grid_reflow(Grid *g, int new_cols, int *slot, int *col)
  * cur_slot is the absolute row[] slot of the tracked cell (the cursor), or -1 when the caller has
  * no cursor to preserve. It decides WHICH end of the viewport loses rows on a shrink, and that is
  * not a detail: getting it wrong moves the cursor off the line it sits on, the application then
- * repaints there, and the old copy stays on screen (the zoom leftover-lines bug, ISSUES.md #4). */
+ * repaints there, and the old copy stays on screen (the zoom leftover-lines bug). */
 static void grid_resize_rows(Grid *g, int rows, int cur_slot)
 {
     /* Resize math below assumes the slots below the viewport are free, which is only true

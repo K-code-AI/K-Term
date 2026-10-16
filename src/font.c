@@ -15,8 +15,8 @@
 
 #define ATLAS_W0 512
 #define ATLAS_H0 512
-/* Color emoji bitmaps are big (Noto Color Emoji: 136x128 px per glyph), so the color atlas is
-   wider than the mono one and its height is capped: 1024*8192*4 = 32 MB is already ~1900
+/* Color emoji bitmaps are big (the installed Noto Color Emoji strike: 136x128 px per glyph), so the
+   color atlas is wider than the mono one and its height is capped: 1024*8192*4 = 32 MB is already ~1900
    distinct emoji, and anything past that falls back to the mono glyph instead of growing the
    atlas forever (a `cat` of an emoji-heavy file must not exhaust memory). */
 #define CATLAS_W0 1024
@@ -526,8 +526,9 @@ static void fc_color_lookup(uint32_t cp, char *out, size_t cap)
 }
 
 /* Open the color emoji face and build the HarfBuzz font that shapes clusters against it.
-   Noto Color Emoji is bitmap-only (FT_IS_SCALABLE == 0, one 128px CBDT strike), so the strike
-   is selected with FT_Select_Size and bitmaps are loaded unscaled; a scalable color font
+   The installed Noto Color Emoji is bitmap-only (FT_IS_SCALABLE == 0) with ONE CBDT strike whose
+   bitmaps are 136x128 px, so the strike is selected with FT_Select_Size and bitmaps are loaded
+   unscaled; a scalable color font
    (COLR/SVG) is sized to the cell instead. color_ok stays 0 when the system has no color font,
    when FreeType was built without color-bitmap support, or when HarfBuzz cannot wrap the face —
    in every one of those cases the mono fallback still draws the emoji. */
@@ -566,12 +567,19 @@ static void color_init(Font *f)
             return;
         }
         /* size metrics are 26.6 fixed point; this is the strike's own line height, i.e. the
-           pixel size the unscaled bitmaps are drawn at (128 for Noto Color Emoji). */
+           pixel size the unscaled bitmaps are drawn at. It comes from the font, not from here:
+           128 for the installed Noto Color Emoji, and the L_INFO line below logs what a given
+           box really reports. */
         f->color_px = (int)(face->size->metrics.height / 64);
         if (f->color_px <= 0)
             f->color_px = (int)face->size->metrics.y_ppem;
+        /* Last resort for a color face that reports no usable metrics at all. color_px is the
+           divisor in render_draw's `cell_h / color_px`, so it must stay > 0; assuming the text
+           pixel size makes the emoji about one cell tall instead of trusting a hard-coded strike
+           height (font_size is clamped to 6..256 in config.c, so f->px is always > 0). Never taken
+           with the installed font: height/64 = 128 and y_ppem = 109 there. */
         if (f->color_px <= 0)
-            f->color_px = 128;
+            f->color_px = f->px;
     }
 
     hb_font_t *hf = hb_ft_font_create_referenced(face);
@@ -789,10 +797,11 @@ int font_resize(Font *f, int px)
     font_metrics(f, px);
     f->px = px;
 
-    /* Color emoji: a bitmap-only strike (Noto Color Emoji) is loaded UNSCALED and scaled at
-       draw time, so zooming needs nothing here — the atlas stays valid and the emoji stay as
-       sharp as the single 128px strike allows. A scalable color face (COLR/SVG) is sized like
-       the text face, so its cached bitmaps are dropped and re-shaped at the new px. */
+    /* Color emoji: a bitmap-only strike (the installed Noto Color Emoji: one strike, 136x128 px
+       bitmaps) is loaded UNSCALED and scaled at draw time, so zooming needs nothing here — the
+       atlas stays valid and the emoji stay as sharp as that single strike allows. A scalable color
+       face (COLR/SVG) is sized like the text face, so its cached bitmaps are dropped and re-shaped
+       at the new px. */
     if (f->color_ok && f->cface && FT_IS_SCALABLE((FT_Face)f->cface)) {
         if (FT_Set_Pixel_Sizes((FT_Face)f->cface, 0, (FT_UInt)px)) {
             klog(L_WARN, "FT_Set_Pixel_Sizes(%d) failed for the color face", px);

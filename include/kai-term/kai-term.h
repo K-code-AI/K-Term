@@ -189,7 +189,7 @@ void grid_resize(Grid *g, int rows, int cols, int *slot, int *col);
    On a height SHRINK the viewport gives up its BOTTOM rows while the cursor has rows below it, and
    only after that its TOP rows (into scrollback). Either way the tracked cell keeps its content
    line; if it instead got pushed out of the viewport the application would repaint at the wrong
-   place and leave its old output behind (ISSUES.md #4). */
+   place and leave its old output behind (the zoom leftover-lines bug). */
 void grid_resize_plain(Grid *g, int rows, int cols, int cur_slot);
 void grid_destroy(Grid *g);
 Cell *grid_vprow(Grid *g, int y);   /* viewport row y (0..rows-1) */

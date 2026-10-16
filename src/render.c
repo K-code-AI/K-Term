@@ -758,10 +758,12 @@ int render_draw(Render *r, Font *f, const Layout *lay, Term *const *terms)
                 float px = pd.gx + x * cw, py = (pd.nrows - 1 - y) * ch + pd.pad_gl;
 
                 if (cg) {
-                    /* The color bitmap carries UNSCALED strike metrics (128px strike on this box),
-                       so the scale factor is cell-height / strike-height: zooming resizes the quad
-                       without ever re-rasterizing the emoji. An emoji fills its cell box; a WIDE
-                       emoji gets the 2-cell span it reserved, so it is never squished. */
+                    /* The color bitmap carries UNSCALED strike metrics, and f->color_px is that
+                       strike's own pixel height as the font reports it (128 for the installed Noto
+                       Color Emoji), so the scale factor is cell-height / strike-height: zooming
+                       resizes the quad without ever re-rasterizing the emoji. An emoji fills its
+                       cell box; a WIDE emoji gets the 2-cell span it reserved, so it is never
+                       squished. */
                     float s = ch / (float)f->color_px;
                     float gw = (float)cg->w * s, gh = (float)cg->h * s;
                     /* The span is the WHOLE cluster's width, not just the base codepoint's: vt.c
