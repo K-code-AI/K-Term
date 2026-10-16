@@ -16,25 +16,29 @@ Kai-Term is a lightweight Linux terminal emulator for Wayland written in C: nati
 RGBA8 color emoji) in one draw call per frame, plus in-window multiplexing (several sessions per window,
 a tab bar and a side-by-side pane view). No GUI framework.
 
-## Current Status (build/test/asan re-verified 2026-10-16, session 63)
+## Current Status (build/test/asan re-verified 2026-10-17, session 64)
 
 - Clean tree: `make` -> exit 0, **0 warnings** under the Makefile's `WARN` set (`-Wall -Wextra -Wshadow
   -Wwrite-strings -Wformat=2 -Wdiscarded-qualifiers`); `make test` -> **`501 checks, 0 failures`** +
   **`MODEL OK (0 problems)`** + **`CLI: 86 checks, 0 failures, 0 skipped`**; `make asan` -> `501 checks,
-  0 failures` + `MODEL OK`, no LeakSanitizer/UBSan report. All three re-run from a clean tree in session 63
-  (`make clean && make`, `make test`, `make asan`; logs were in `/tmp/s63/`, which does not survive a reboot).
+  0 failures` + `MODEL OK`, no LeakSanitizer/UBSan report. All three re-run from a clean tree in session 64
+  (`make clean && make`, `make test`, `make asan`; build log `/tmp/s64_build.log`, which does not survive a
+  reboot).
   No temporary probe or experiment remains in the tree (`grep -rnE "TEMPORARY|PROBE|EXPERIMENT|NEGATIVE"
   src/ include/ tests/` -> nothing). README's flag table (`-e -w -c -d -v -h`) and its 27 settings rows
   match `src/main.c` and `src/config.c`.
 - **Multiplexing, the tab bar and the side-by-side view (sessions 56-62) are implemented, built,
-  unit-tested and verified by log lines — NOT yet confirmed by the user by eye.** Proven: `Ctrl+Shift+T`
-  opens a session, `Ctrl+Shift+Right/Left` switch, `Ctrl+Shift+1`…`9` jump, `Ctrl+Shift+S` flips tab view
-  and side-by-side view, `Ctrl+Shift+W` closes one and closing the last exits — all logged as `mux:` /
-  `layout:` / `grid resized` lines, and clean under an ASan build of the binary itself. A LEFT click on a
-  bar item switches and a MIDDLE click closes, proven with the absolute pointer injector. 501 unit checks
-  cover mux, the key-binding parser, the config keys, `layout_compute`, and `mouse_sgr_button`. NOT proven
-  by any of that: that the bar looks right, that labels are legible, that the focus border is where it
-  should be — the user verifies anything visual themselves.
+  unit-tested, verified by log lines AND confirmed by the user by eye (2026-10-17: "it works as expected and
+  looks great").** Proven: `Ctrl+Shift+T` opens a session, `Ctrl+Shift+Right/Left` switch,
+  `Ctrl+Shift+1`…`9` jump, `Ctrl+Shift+S` flips tab view and side-by-side view, `Ctrl+Shift+W` closes one and
+  closing the last exits — all logged as `mux:` / `layout:` / `grid resized` lines, and clean under an ASan
+  build of the binary itself. A LEFT click on a bar item switches and a MIDDLE click closes, proven with the
+  absolute pointer injector. 501 unit checks cover mux, the key-binding parser, the config keys,
+  `layout_compute`, and `mouse_sgr_button`. That feature is closed — no visual question is left open on it.
+- **No open issues.** The four items that were in ISSUES.md "Open" were cleared unproven on 2026-10-17 at the
+  user's request (never reproduced here; the user is not sure they are Kai-Term defects). They are under
+  ISSUES.md "Cleared", not under "Fixed" — nothing was verified as a fix. If one recurs it gets re-filed with
+  a reproduction.
 - **User-confirmed in their real window:** zoom (no stale prompt lines), window padding, fullscreen
   refresh, the black-window/no-input fix, the heavy-output segfault fix, transparency, bracketed paste,
   `clear` dropping the scrollback, the shell's starting directory, color emoji, text selection, the
@@ -51,20 +55,26 @@ a tab bar and a side-by-side pane view). No GUI framework.
 
 ## Current Task
 
-**Nothing is in progress.** The last task (sessions 56-62: multiplexing + tab bar + side-by-side view) is
-closed: wired into `src/main.c`, whole suite green, live key/pointer verification done, three real defects
-found and fixed, docs synced, committed and pushed as `d05c817`.
+**In progress (session 64, 2026-10-17): clear the four items in ISSUES.md "Open" and push.**
 
-Open, in priority order (details and reproduction in ISSUES.md "Open"):
-1. **ISSUES.md Open #1** — launching a second instance while another is still running prints
-   `atlas glTexImage2D failed: 0x505 (512x512)` and then SIGSEGV. The only crash left; never reproduced
-   here. Work from the source and a headless harness, not from the screen.
-2. **ISSUES.md Open #2** — `eglSwapBuffers failed: 0x3000` on launch plus one `swap failed (1 in a row)`
-   warning. The retry works and nothing looks wrong: decide whether it is a real first-frame race or just a
-   log line to soften.
-3. **ISSUES.md Open #4** — the intermittent fullscreen freeze, deferred by the user (session 59).
-4. **The user has not looked at the tab bar / side-by-side view in their own window.** Their verdict is what
-   closes that feature visually — the log lines prove behaviour, not appearance. Ask.
+USER VERDICT (2026-10-17): the user has looked at the tab bar and the side-by-side view in their own window
+— "it works as expected and looks great". The multiplexing feature is now confirmed by eye as well as by
+log lines. That closes the last open question on sessions 56-62.
+
+OBJECTIVE: the user does not believe the four "Open" items are established Kai-Term defects and wants them
+cleared; they will re-report anything they actually hit again. They are NOT fixes, so they must NOT move to
+"Fixed" (nothing was verified as fixed). Plan:
+1. Replace ISSUES.md "Open" with a short "Cleared" section: one entry per item, kept brief, each stating it
+   was never reproduced here and may be re-filed. Keep the numbers (`Open #1`-`#4`) findable so dated
+   journal entries that cite them still resolve.
+2. Fix the cross-references that would otherwise dangle: ISSUES.md "Fixed" fullscreen entry (cites Open #4),
+   AGENT.md Current Status, Next Steps #1, README's "outstanding issues" line.
+3. Re-verify build/test/asan after the doc edits (docs-only, but status lines must be re-measured, not
+   inherited).
+4. Commit, then `git fetch` and push — the user approved the push this session.
+
+Expected outcome: ISSUES.md has no Open section; the four reports survive only as one-line entries under
+"Cleared"; the journal records the user's visual confirmation and the push.
 
 ## Progress Journal (condensed; root causes live in ISSUES.md "Fixed")
 
@@ -177,9 +187,39 @@ Open, in priority order (details and reproduction in ISSUES.md "Open"):
   NEXT ACTION: ask whether to `git push origin main`; then ask the user to look at the tab bar /
   side-by-side view in their own window and to pick the next issue (#1, #2 or #4).
 
+- **2026-10-17, session 64** — USER CONFIRMATION + ISSUE CLEAR-OUT + PUSH.
+  WHAT THE USER REPORTED: they have looked at the tab bar and the side-by-side view in their own window — the
+  multiplexing feature "works as expected and looks great". They also asked to clear the four ISSUES.md
+  "Open" items: they are not sure those are Kai-Term defects, they need further testing, and anything real
+  will be re-reported later.
+  ACTIONS:
+  1. ISSUES.md: the `## Open` section (4 items, 62 lines) is replaced by `## Cleared (2026-10-17, session 64)`
+     — one short entry per item, each marked never-reproduced-here, keeping only the facts worth reusing:
+     `0x505` = `GL_INVALID_VALUE` at the mono atlas upload in `render_draw`; `0x3000` = `EGL_BAD_ALLOC` with
+     the retry path already correct; the leaks sit only in libdbus/libwayland/driver frames (1250 bytes in 5
+     allocations, none from Kai-Term source); the fullscreen-freeze detection levers. They are NOT under
+     "Fixed" — nothing was verified as a fix — and the section says plainly that "cleared" means unproven,
+     not disproven (the withdrawn session-42 dismissal is noted). The `Open #1`-`#4` labels are kept so dated
+     entries that cite them still resolve. ISSUES.md 705 -> 673 lines.
+  2. Cross-references that would otherwise dangle: the "Fixed: Fullscreen" entry now reads "was tracked as
+     Open #4 and cleared unproven on 2026-10-17"; AGENT.md Current Status gained a "No open issues" bullet;
+     Next Steps #1 no longer lists three open bugs; the Project Files tree and README's Documentation line no
+     longer promise an open-issue list.
+  3. AGENT.md: multiplexing / tab bar / side-by-side moved from "NOT yet confirmed by the user by eye" to
+     confirmed by eye, and the "user has not looked at the tab bar" item is gone from Current Task. Next Steps
+     #5 now says the `s61/` + `s61_apinject*` scratch probes no longer have to be kept (still outside the
+     repo, so nothing was deleted without asking).
+  VERIFIED, not inherited — after the doc edits, from a clean tree: `make clean && make` -> exit 0, 0
+  warnings; `make test` -> `501 checks, 0 failures` + `MODEL OK (0 problems)` + `CLI: 86 checks, 0 failures,
+  0 skipped`; `make asan` -> `501 checks, 0 failures` + `MODEL OK`, no LeakSanitizer/UBSan report. No source,
+  header, Makefile or test file was touched — the change set is documentation only.
+
 ## Next Steps
 
-1. The three open bugs (ISSUES.md "Open" #1, #2, #4) — start with #1, the only crash left.
+1. **No open bugs.** ISSUES.md has no "Open" section: the four items that were there were cleared unproven
+   on 2026-10-17 (see "Cleared"). If the user hits one of them again, re-file it as a new Open item with a
+   reproduction and start from the measurements already recorded there — for the second-instance crash that
+   means a headless harness plus the source, not the screen.
 2. Housekeeping options, none of them a bug:
    - Make the ASan build of the `kai-term` binary itself a real Makefile target (only the tests have one).
      The hand-built one covered the mux/layout paths and found the `row[rcap]` overrun, so covering the
@@ -201,9 +241,10 @@ Open, in priority order (details and reproduction in ISSUES.md "Open"):
    and a cluster HarfBuzz renders as more than one glyph, which is deliberately rejected (`ng == 1`) and
    falls back to mono.
 5. Scratch cleanup: the throwaway probes live in `/home/kaida/Project/.scratch/` (outside the project).
-   Delete what the user has already confirmed the behaviour for; keep `s61/` and `s61_apinject*` until they
-   have looked at the tab bar / side-by-side view, and keep `s45_old/` + `s47_before/` as the A/B trees in
-   case another draw-path regression is suspected.
+   Delete what the user has already confirmed the behaviour for — the tab bar / side-by-side view is now
+   confirmed (2026-10-17), so `s61/` and `s61_apinject*` no longer have to be kept. Keep `s45_old/` +
+   `s47_before/` as the A/B trees in case another draw-path regression is suspected. Not done yet: ask before
+   deleting anything outside the repo.
 6. Git: keep committing verified work; `git fetch` before pushing.
 
 ## Project Files
@@ -213,7 +254,7 @@ Kai-Term/
 ├── .gitignore                   # bin/, build/, *.o/*.obj/*.d/*.so/*.a, editor leftovers, docs/ARCHITECTURE.md
 ├── LICENSE                      # MIT, "Copyright (c) 2026 Kaida"
 ├── AGENT.md                     # this journal
-├── ISSUES.md                    # open bugs + known limitations + fixed history (root causes)
+├── ISSUES.md                    # cleared reports + known limitations + fixed history (root causes)
 ├── README.md                    # features, deps, build, flags, config keys, shortcuts
 ├── Makefile                     # src/*.c -> build/*.o -> bin/kai-term; all/test/test-cli/asan/run/clean
 ├── include/kai-term/kai-term.h  # the single shared header: all types, prototypes, log levels, helpers

@@ -15,67 +15,34 @@ re-introducing the bug. Module design and the invariants a change must not break
 > quoted output and the entries under "Fixed", which keep the spelling they were recorded with — those
 > lines were really printed by the old binary.
 
-## Open
-1. **Second instance crashes: `atlas glTexImage2D failed: 0x505 (512x512)` then SIGSEGV** (user report,
-   2026-10-15). Reproduce as reported: leave one `kai-term` running (their words: a process left hanging in
-   the background), then start another from a shell ->
-   ```
-   k-term error: atlas glTexImage2D failed: 0x505 (512x512)
-   fish: Job 1, 'k-term' terminated by signal SIGSEGV (Address boundary error)
-   ```
-   (quoted exactly as the user reported it, i.e. with the pre-rename name; the same lines now read
-   `kai-term error: …` and `'kai-term' terminated by …`.)
-   With no leftover process, two launches in a row both work. `0x505` is `GL_INVALID_VALUE` from the mono
-   atlas upload in `render_draw` (src/render.c), i.e. the failure happens on the FIRST frame that has
-   glyphs to draw, and the segfault follows immediately. Note: `0x505` and `0x3000` lines were previously
-   (session 42) dismissed as artifacts of the probe/timeout harnesses — that dismissal is now withdrawn,
-   the user sees them in normal use. Not yet reproduced here; investigation in progress (session 52).
-2. **`eglSwapBuffers failed: 0x3000` on launch** (user report, 2026-10-15). Reproduce: start `kai-term`
-   normally ->
-   ```
-   k-term error: eglSwapBuffers failed: 0x3000
-   k-term warn: swap failed (1 in a row), retrying on the next frame
-   ```
-   (quoted as reported, pre-rename; it now reads `kai-term error:` / `kai-term warn:`.)
-   No visible effect: the 8 ms timer retries and the window draws correctly. `0x3000` is `EGL_BAD_ALLOC`.
-   The frame-pacing code already handles a failed swap correctly (it keeps the frame dirty and arms no
-   frame callback), so this is a spurious first-frame failure plus an error line, not a freeze — but it
-   should not happen at all. Investigation in progress (session 52).
-3. **LeakSanitizer reports only third-party frames.** An ASan build of the `kai-term` binary itself
-   reports leaks inside libdbus-1, libwayland-client and dynamically loaded driver modules; no leak
-   frames in Kai-Term source. Not a Kai-Term bug. (There is currently no `kai-term` ASan target — only the
-   tests have one; adding one is listed in AGENT.md Next Steps. The hand-built one was re-run in session 61
-   over a full multi-session run: no AddressSanitizer error, no UBSan "runtime error", 1250 bytes leaked in
-   5 allocations, none of them from Kai-Term source.)
-4. **Fullscreen freezes the display again — INTERMITTENT** (user report, session 58, 2026-10-15; the user
-   added on 2026-10-16 that "it's intermittent and doesn't always reproduce", and asked to note it and come
-   back to it later). This is a regression of the bug fixed in sessions 45-47 (see "Fixed: Fullscreen: the
-   display stopped refreshing"), which the user had confirmed fixed in their real window on 2026-10-15.
-   Symptom as reported: entering fullscreen stops the picture updating.
-   NOT REPRODUCED HERE. It was uninvestigatable when this entry was written because `bin/kai-term` did not
-   link; since session 60 it links again, so the levers below work — but the user deferred the item, so no
-   run has been made. The intermittency fits the mechanism found in session 46:
-   the freeze needs a configure whose size change is NOT answered with a buffer of the new size, or a swap
-   that runs while a `wl_display_prepare_read()` is outstanding — whether either happens depends on what
-   else is dirty at that moment, which is timing-dependent, so "sometimes" is the expected shape.
-   A second reason to expect intermittency: the session-57/58 layout rewiring moved the draw/commit path
-   (per-pane origins, the bar, `render_draw` taking a `Layout`), so the frame-pacing rules the session-47 fix
-   depends on have to be re-checked in the new code rather than assumed to have survived. Session 61's live
-   runs (several sessions opened, closed, switched, toggled between views, plus a full ASan run of the
-   binary) showed no freeze and no `swap failed` streak, which is reassuring but is not a fullscreen test.
-   How to investigate (all proven here in sessions 46-47, no screen recording
-   needed — the user verifies anything visual themselves):
-   * `-d` and look for the pair `toplevel state: fullscreen 1 …` followed by `configure answered: buffer
-     <output size> attached (grid …)`. A fullscreen configure with NO `configure answered` line, or one that
-     reports the OLD pixel size, is the bug.
-   * A streak of `swap failed (N in a row)` means the compositor is not showing the surface.
-   * `cat /proc/<pid>/wchan` while frozen: `ep_poll` = the loop is alive (a commit/pacing problem),
-     `futex_do_wait` = blocked inside `eglSwapBuffers` (the prepared-read problem).
-   * Reproduce with the compositor's own fullscreen action driven by key injection (niri `Mod+Shift+M`),
-     several times in a row, and count how many runs freeze — with an intermittent bug a single clean run
-     proves nothing, so record the rate.
-   Deferred by the user's instruction (session 59). Do not close the "Fixed" entry above on the assumption
-   that it still holds.
+## Cleared (2026-10-17, session 64)
+
+The four items that used to be numbered **Open #1-#4** are cleared at the user's request: none of them was
+ever reproduced here, and the user is not convinced they are Kai-Term defects rather than
+environment/compositor behaviour. Cleared is NOT fixed - nothing was verified as a fix, so they do not belong
+under "Fixed". Anything seen again should be re-filed as a new Open item with a reproduction. One line each,
+kept so a re-report starts from the measurements that already exist. (The session-42 dismissal of the
+`0x505`/`0x3000` lines as probe-harness artifacts was withdrawn in session 52 - the user did see them in
+normal use - so "cleared" here means unproven, not disproven.)
+
+- **Open #1 - second instance: `atlas glTexImage2D failed: 0x505 (512x512)`, then SIGSEGV** (user report,
+  2026-10-15, with a `kai-term` left running in the background). `0x505` is `GL_INVALID_VALUE` at the mono
+  atlas upload in `render_draw` (src/render.c): the first frame that has glyphs to draw. Never reproduced
+  here - two launches in a row both work when no instance is left over.
+- **Open #2 - `eglSwapBuffers failed: 0x3000` on launch** plus one `swap failed (1 in a row)` warning (user
+  report, 2026-10-15). `0x3000` is `EGL_BAD_ALLOC`. No visible effect: the 8 ms timer retries, and the
+  frame-pacing code already keeps the frame dirty and arms no frame callback after a failed swap.
+- **Open #3 - LeakSanitizer reports only third-party frames** (libdbus-1, libwayland-client, dynamically
+  loaded driver modules). A hand-built ASan `kai-term` over a full multi-session run (session 61): no
+  AddressSanitizer error, no UBSan runtime error, 1250 bytes leaked in 5 allocations, none from Kai-Term
+  source. Not a Kai-Term bug.
+- **Open #4 - fullscreen freezes the display, INTERMITTENT** (user report, session 58; "doesn't always
+  reproduce", deferred by the user on 2026-10-16). Never reproduced here. The mechanism behind the earlier,
+  confirmed version of this bug and the levers for detecting it (`toplevel state: fullscreen 1 …` with no
+  matching `configure answered:` line, a `swap failed (N in a row)` streak, `cat /proc/<pid>/wchan` =
+  `ep_poll` vs `futex_do_wait`) are recorded under "Fixed: Fullscreen: the display stopped refreshing" and in
+  AGENT.md "Key Decisions & Pitfalls".
+
 
 ## Known limitations
 Not bugs — current behaviour the user has to know about. (Root causes of actual bugs are in "Fixed".)
@@ -280,8 +247,9 @@ Not bugs — current behaviour the user has to know about. (Root causes of actua
   six zoom steps (was three prompts and two gaps).
 - **Fullscreen: the display stopped refreshing** (user report, `NextFeature.md` #2; sessions 45-47, the
   user CONFIRMED the fix in their real window on 2026-10-15). NOTE (session 59): the user has since reported
-  the freeze coming back, intermittently — that is tracked as Open #4, and this entry stands as the record of
-  the root cause and of the rules that fixed it, not as a claim that fullscreen is freeze-free. Symptom was: enter fullscreen (niri
+  the freeze coming back, intermittently — that was tracked as Open #4 and cleared unproven on 2026-10-17
+  (see "Cleared" above), and this entry stands as the record of the root cause and of the rules that fixed
+  it, not as a claim that fullscreen is freeze-free. Symptom was: enter fullscreen (niri
   `Mod+Shift+M`) and the terminal stops updating — no typed characters and no command output appear —
   until fullscreen is exited, then everything resumes at once. The user had confirmed it was a K-Term bug,
   not a niri one.
