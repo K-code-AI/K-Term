@@ -36,11 +36,11 @@ window, tab bar, side-by-side panes. No GUI framework.
 - Verified at model+live level (not all re-checked by hand): reflow on width change, color emoji + grapheme
   clusters, whole-glyph selection with no band over unwritten space, compositor transparency, CSI 3 J +
   startup dir, client-side key repeat, draw/commit + event-loop pacing.
-- Git: `origin = https://github.com/K-code-AI/Kai-Term`, branch `main`. Last pushed is `1ab9dc8`; everything
-  since (`867d50e`, `d5afe4a`, `a59e7ae` and the journal commits after them) is **local only — not pushed**,
-  nobody asked for a push. Do not write an ahead-count here: the commit recording it makes it wrong. Read it
-  with `git status -sb`. `git fetch` before push — user commits on GitHub too. Never commit `bin/` or
-  `build/`.
+- Git: `origin = https://github.com/K-code-AI/Kai-Term`, branch `main`. As of s67 close **everything on main
+  is pushed** (`main` == `origin/main`, 0 behind / 0 ahead, empty `git diff`). Do not write a hash or an
+  ahead-count here — the commit recording it makes it wrong. Read the truth with `git status -sb` and
+  `git log --oneline origin/main -1`. `git fetch` before push — user commits on GitHub too. Never commit
+  `bin/` or `build/`.
 
 ## Current Task
 
@@ -256,6 +256,11 @@ NEXT ACTION: pick from "Next Steps" (housekeeping — no bug is open), or file a
   AddressSanitizer|runtime error|LeakSanitizer|SUMMARY. Behaviour unchanged, and proven rather than assumed:
   `timeout 6 ./bin/kai-term -d -e true` still logs `color emoji: … (128px strike)` with 0 warn/error lines,
   so the primary metrics path is taken and the rewritten fallback is not reached on this box.
+  DONE (6) remote synced, on request ("make sure the git version fits with the local version"). `git fetch
+  origin` first: 0 behind / 6 ahead, nothing on GitHub to integrate -> fast-forward `git push origin main`
+  pushed `1ab9dc8..eb7ae75` (exit 0). Re-fetched and verified: `main` == `origin/main` == `eb7ae75`,
+  0 behind / 0 ahead, `git diff main origin/main` empty. The journal commit recording this push is itself
+  pushed, so the two stay equal.
 
 ## Next Steps
 
