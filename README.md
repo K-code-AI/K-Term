@@ -232,7 +232,7 @@ default `Ctrl+Shift`, pressing `Ctrl+Shift+3` shows the third session.
 
 ## Documentation
 
-- [ISSUES.md](ISSUES.md) — Known limitations, cleared reports and fixed issues (root causes).
+- [ISSUES.md](ISSUES.md) — open problems (currently none) and known limitations.
 - [AGENT.md](AGENT.md) — Development journal: current state, design invariants and known pitfalls.
 - [LICENSE](LICENSE) — MIT License.
 

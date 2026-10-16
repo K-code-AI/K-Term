@@ -1,12 +1,13 @@
 # Kai-Term — Agent Journal
 
-Read this + ISSUES.md before touching project. User-facing docs: README.md. Bug root causes: ISSUES.md
-"Fixed". Host/tool facts: `/home/kaida/Project/ENVIRONMENT.md` (outside repo on purpose — not project
-documentation).
+Read this + ISSUES.md before touching project. User-facing docs: README.md. Current problems: ISSUES.md
+"Open" (empty). Root causes of long-fixed bugs: git history, not this repo —
+`git show d5afe4a:ISSUES.md`. Host/tool facts: `/home/kaida/Project/ENVIRONMENT.md` (outside repo on purpose
+— not project documentation).
 
 > Renamed 2026-10-16 (session 59): `K-Term`/`k-term` -> `Kai-Term`/`kai-term` (dir, header
 > `include/kai-term/kai-term.h`, config `~/.config/kai-term/kai-term.conf`, app id `Kai-Term`). Old journal
-> entries and ISSUES.md "Fixed" keep old spelling — they record commands really run and log lines really
+> entries and git history keep old spelling — they record commands really run and log lines really
 > printed. Pre-refactor journal: `git show 1ab9dc8:AGENT.md`.
 
 ## Project Overview
@@ -23,8 +24,10 @@ window, tab bar, side-by-side panes. No GUI framework.
 - No probe/experiment left in tree: `grep -rnE "TEMPORARY|PROBE|EXPERIMENT|NEGATIVE" src/ include/ tests/` ->
   empty.
 - README flag table (`-e -w -c -d -v -h`) + 27 settings rows match `src/main.c` / `src/config.c`.
-- **No open issues.** The 4 ex-"Open" items cleared unproven 2026-10-17 (user request; none ever reproduced
-  here). Under "Cleared", NOT "Fixed" — no fix was verified. Recurrence -> new Open item with reproduction.
+- **No open issues.** ISSUES.md "Open" is empty, with verification evidence. The 4 reports that used to be
+  there were unproven (never reproduced here) and were dropped from ISSUES.md entirely on 2026-10-17 — they
+  are not in "Fixed" either, since no fix was ever verified. Recoverable with `git show d5afe4a:ISSUES.md`;
+  recurrence -> file a new Open item with a reproduction.
 - **User-confirmed by eye in their window:** multiplexing + tab bar + side-by-side ("works as expected and
   looks great", 2026-10-17); zoom (no stale prompt lines), padding, fullscreen refresh, black-window/no-input
   fix, heavy-output segfault fix, transparency, bracketed paste, `clear` drops scrollback, shell start dir,
@@ -39,18 +42,16 @@ window, tab bar, side-by-side panes. No GUI framework.
 
 ## Current Task
 
-**Nothing in progress** (s65 closed: AGENT.md rewritten in telegraphic agent-facing style, 4 passes — see the
-s65 journal entry). Now 469 lines / 37.2 KB / 5232 words, from 526 / 45.8 KB / 6679.
+**Nothing in progress** (s66 closed: ISSUES.md gutted to current+verified info only — see the s66 journal
+entry). ISSUES.md is now 100 lines / 1149 words, from 673 / 9059.
 
-Remaining size is content, not English: Architecture & Invariants 35.7% of words, Progress Journal 20.8%,
-Project Files & Facts 13.4%. Going smaller needs a structural choice, not more word-cutting — move
-Architecture + Debugging into a separate `DESIGN.md` (AGENT.md would drop to ~250 lines) or accept losing
-invariant detail. Ask before either.
+One loose end for the user to decide: `src/font.c` lines 529 and 794 still claim a "128px" emoji strike and
+the fallback constant at line 574 is 128, but the installed NotoColorEmoji.ttf has a single 56px strike
+(measured). Source-comment fix, not docs — not done unasked.
 
-NEXT ACTION: pick from "Next Steps" (housekeeping — no bug is open), or re-file a cleared report with a
-reproduction if user hits one again.
+NEXT ACTION: pick from "Next Steps" (housekeeping — no bug is open), or file a problem with a reproduction.
 
-## Progress Journal (root causes: ISSUES.md "Fixed")
+## Progress Journal (root causes of fixed bugs: git history)
 
 - **2026-10-12/14, s1-12** — scaffold; first build. vt.c grid -> rotation permutation (`row[]` always valid);
   CSI params; event loop -> `prepare_read -> epoll_wait -> read_events`; EGL/FreeType init; render fixes
@@ -143,12 +144,46 @@ reproduction if user hits one again.
   source, header, Makefile or test file touched; `make`/`make test`/`make asan` re-run from a clean tree after
   each pass; numbers in Current Status are those runs. A `DESIGN.md` split (Architecture + Debugging are ~40%
   of file) was considered and NOT done — user chose word-level compression.
+- **2026-10-17, s66 — ISSUES.md gutted to current + verified info only.** User directive: keep only
+  up-to-date relevant info; the file should be nearly empty unless a real verified problem exists.
+  VERIFIED FIRST from a clean tree: `make` exit 0 / 0 warnings; `make test` 501/0 + MODEL OK + CLI 86/0/0;
+  `make asan` 501/0 + MODEL OK, 0 sanitizer reports; `grep TODO|FIXME|XXX|HACK` over src/ include/ tests/ ->
+  only a test payload string. So no verified open problem exists.
+  BEFORE: 673 lines / 9059 words — 78.9% of words in 54 historical "Fixed" root-cause entries, 15.2% Known
+  limitations, 4.0% the 4 unproven "Cleared" reports.
+  AFTER: 100 lines / 1149 words. `## Open` = none, with the verification evidence and the rule for filing
+  (symptom + exact reproduction + what `-d` logs; not reproducible -> not filed). `## Known limitations` =
+  all 19 limitations kept, grouped Grid/scrollback, Selection/clipboard, Sessions/layout, Rendering/input,
+  each re-checked against the source rather than trusted: `rcap` fixed at startup (vt.c:255) and
+  `sb_limit()` (vt.c:245); `term_select_clear` on scroll (main.c:307) and resize (vt.c:728);
+  `copy_on_release = 0` default (config.c:48); `CLUSTER_MAX 8` (header:34); color atlas 1024 -> 8192
+  (font.c:22,24); only `text/plain` offered (main.c:1379) and no `wl_data_offer_accept` call anywhere;
+  window title from `mux_title()` (main.c:451-452) with OSC title kept in `t->title` (vt.c:1615); alt screen
+  via `grid_resize_plain()` (vt.c:572,713); floor-division remainder (vt.c:689-693); min size 200x100
+  (main.c:1598); `PASTE_BUF_MAX` 8 MiB sent raw on overflow (main.c:155,1980,1403); DEC 2004 gate
+  (vt.c:1397,1414); `repeat_info` logged but deliberately unused (main.c:160-164,1448); `split_max` clamp +
+  `*` mark in `bar_label` (layout.c:52,67).
+  DROPPED: the 54 "Fixed" entries and the 4 "Cleared" reports — history, not current info, and neither was a
+  verified current problem. Recoverable: `git show d5afe4a:ISSUES.md`. The rules those bugs produced stay in
+  "Architecture & Invariants", which is what an agent should read.
+  Dangling refs fixed: AGENT.md preamble, journal header, Architecture header, Next Steps #1, Project Files
+  tree, Current Status; README Documentation line. Historical journal entries that mention the old sections
+  were left alone — they record what was really done.
+  STALE FACT FOUND while re-checking: ISSUES.md and `src/font.c` comments (529, 794) claimed a single
+  **128px** CBDT strike for the installed NotoColorEmoji.ttf. Reading the CBLC size table directly: exactly
+  one strike, `numSizes=1`, `strikeSize=56`; `fc-scan` gives `pixelsize=109`, `unitsPerEm=2048`. Behaviour
+  (bitmap-only -> one strike -> zoom scales, never re-rasterizes) is real; the px number is a host fact, so
+  ISSUES.md now states the behaviour with no hard-coded number and the measurement went to ENVIRONMENT.md
+  ("Fonts", outside the repo). The two stale `font.c` comments + the 128 fallback constant (font.c:574) are
+  a source change — left for the user to approve.
+  Docs only — no source, header, Makefile or test file touched. `make`/`make test`/`make asan` re-run from a
+  clean tree afterwards; numbers in Current Status are those runs.
 
 ## Next Steps
 
-1. **No open bugs.** ISSUES.md has no "Open" section (see "Cleared"). If a cleared report recurs, re-file it
-   with a reproduction and start from measurements already there — for second-instance crash: source +
-   headless harness, not screen.
+1. **No open bugs.** ISSUES.md "Open" is empty. If a dropped report recurs, file it with a reproduction and
+   start from scratch — for second-instance crash: source + headless harness, not screen. Old wording of
+   those 4 reports: `git show d5afe4a:ISSUES.md`.
 2. Housekeeping, none a bug:
    - ASan build of `kai-term` binary itself as a real Makefile target (only tests have one). The
      hand-built one covered mux/layout and found `row[rcap]` overrun; covering Wayland/EGL would pay off
@@ -181,7 +216,7 @@ Kai-Term/
 ├── .gitignore                   # bin/, build/, *.o/*.obj/*.d/*.so/*.a, editor leftovers, docs/ARCHITECTURE.md
 ├── LICENSE                      # MIT, "Copyright (c) 2026 Kaida"
 ├── AGENT.md                     # this journal
-├── ISSUES.md                    # cleared reports + known limitations + fixed history (root causes)
+├── ISSUES.md                    # open problems (none now) + known limitations
 ├── README.md                    # features, deps, build, flags, config keys, shortcuts
 ├── Makefile                     # src/*.c -> build/*.o -> bin/kai-term; all/test/test-cli/asan/run/clean
 ├── include/kai-term/kai-term.h  # the single shared header: all types, prototypes, log levels, helpers
@@ -247,7 +282,7 @@ Kai-Term/
 
 ## Architecture & Invariants
 
-Rules a change must not break. Why each exists: ISSUES.md "Fixed".
+Rules a change must not break. Why each exists: git history of fixed bugs (`git show d5afe4a:ISSUES.md`).
 
 **Data flow.** PTY bytes -> `term_parse()` (vt.c) -> one `Grid` per session -> `Mux.tab[]` owns one
 `{Term, Pty}` per session, one ACTIVE -> `layout_compute()` (window px + cell px + padding + mode + session
