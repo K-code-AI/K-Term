@@ -143,11 +143,15 @@ Planned steps (each verified before the next):
    here — it is the user's compositor config, they decide).
 Expected outcome: `make` builds `bin/kai-term`, the window reports `app_id = Kai-Term`, the config is read
 from `~/.config/kai-term/kai-term.conf`, and no file in the project still uses the old spelling except in
-dated history. NOT part of this task: the GitHub repository name (`origin` stays
-`https://github.com/K-code-AI/K-Term` until the user renames it there, then `git remote set-url`).
+dated history. NOT part of this task: the GitHub repository name (`origin` stayed
+`https://github.com/K-code-AI/K-Term` until the user renamed it there — DONE since: re-checked 2026-10-16
+(session 62), `git remote -v` now says `https://github.com/K-code-AI/Kai-Term` and the push of session 62
+went to it).
 
-FOLLOW-UPS THE USER HAS TO DECIDE ON (outside this project; three of them are root-owned and `sudo` here
-asks for a password, so they were NOT touched):
+FOLLOW-UPS THE USER HAS TO DECIDE ON (outside this project. Re-checked 2026-10-16, session 62: the niri rule
+still says `K-Term`, `/usr/local/bin/k-term` is still the only installed binary (root-owned, mtime 2026-10-15
+22:08) and no `kai-term` is installed — `command -v kai-term` finds nothing while `command -v k-term` finds
+`/usr/local/bin/k-term`; the desktop-terminal script still execs the old name and path):
 * `~/.config/niri/config.kdl` line 83 `match app-id="K-Term"` — a window rule (no focus ring, half-width
   column). It stops matching once the app id becomes `Kai-Term`. Fix: change it to `match app-id="Kai-Term"`
   (or add a second `match` line so both work). niri reloads with `niri action reload-config`.
@@ -155,12 +159,15 @@ asks for a password, so they were NOT touched):
   8069009ae927fcfd2046f3e2a64ed85a). There is no `install` target in the Makefile, so it was copied by hand.
   Until it is replaced by `bin/kai-term`, the user is still running the OLD name with the OLD default config
   path.
-* `/usr/local/bin/desktop-terminal` (root-owned) is `#!/bin/sh` + `exec k-term -c
+* `/usr/local/bin/desktop-terminal` is `#!/bin/sh` + `exec k-term -c
   ~/.config/k-term/desktop-terminal.conf`, and `~/.local/share/applications/desktop-terminal.desktop`
   launches it. Both the command and the config path in that script need the new spelling once the binary is
-  installed as `kai-term`.
-* The GitHub repository itself: rename it on GitHub, then `git remote set-url origin
-  https://github.com/K-code-AI/Kai-Term` and `git fetch`.
+  installed as `kai-term`. (Session 59 called this file root-owned; re-checked 2026-10-16 it is `-rwxr-xr-x
+  kaida kaida`, 64 bytes, mtime 2026-10-15 16:29 — so it is editable without sudo, but it is the user's file
+  and they said they would handle it.)
+* The GitHub repository itself: DONE — re-checked 2026-10-16 (session 62), `git remote -v` reports
+  `https://github.com/K-code-AI/Kai-Term` for both fetch and push, and `git push origin main` succeeded, so
+  no `git remote set-url` is needed any more.
 
 COMPLETED SPECIFICATION (written during sessions 56-58, before the session-59 rename; finished by sessions
 60-62). These blocks were written BEFORE the rename, so read their paths with that in mind: `include/k-term/k-term.h` is now
@@ -1558,6 +1565,30 @@ message; committed and pushed as `b451d87`.
     stays verified by the unit round trip only.
   NEXT ACTION: `git fetch`, check ahead/behind, commit everything and push to `origin/main`.
 
+  STEP 6 DONE — committed and pushed.
+  * `git fetch origin` then `git rev-list --left-right --count origin/main...main` -> `0 0`, so no rebase was
+    needed (the pitfall from session 50 checked, not assumed).
+  * `git add -A` -> 18 paths staged: 16 modified, `src/mux.c` + `src/layout.c` added, and the header recorded
+    as a RENAME `include/k-term/k-term.h -> include/kai-term/kai-term.h`. Nothing under `bin/` or `build/`
+    was staged (`git diff --cached --name-only | grep -E '^(bin|build)/'` -> nothing).
+  * `git commit` -> `d05c817 "Multiplexing, tab bar + side-by-side view; rename to Kai-Term"`.
+  * `git push origin main` -> `0437537..d05c817 main -> main`, exit 0; afterwards `git status -sb` shows
+    `## main...origin/main` with no ahead/behind and `git rev-list --left-right --count` -> `0 0`.
+  FACT FOUND DURING THE PUSH: the remote URL is now `https://github.com/K-code-AI/Kai-Term` — the user renamed
+  the GitHub repository and the local remote already points at it, so the "origin is still K-Term" note that
+  sessions 50-59 carried is OBSOLETE. Corrected in the Git Key Decision, in Next Steps 6 and in the session-59
+  follow-up list (that item is now DONE). The other three follow-ups were RE-VERIFIED as still pending: niri
+  config line 83 is still `match app-id="K-Term"`, `/usr/local/bin/k-term` is still the only installed binary
+  (root-owned, mtime 2026-10-15 22:08) with no `kai-term` in PATH, and `/usr/local/bin/desktop-terminal` still
+  execs `k-term -c ~/.config/k-term/desktop-terminal.conf` (that file is actually user-owned, not root-owned as
+  session 59 said — corrected). Not touched: they are the user's, and they took them on in session 61.
+  The doc corrections above are the follow-up commit.
+  SESSION 62 RESULT: sessions 56 + 57 are finished, three real defects fixed (two of them found by the live
+  run, one by reading the docs against the source), all four docs consistent at 501 checks / CLI 86, and
+  everything is committed and pushed. Nothing is in progress.
+  NEXT ACTION: ask the user to look at the tab bar and the side-by-side view in their own window (the one
+  thing no test here can verify), and ask which of ISSUES.md Open #1/#2/#4 to take next.
+
 ## Environment (verified 2026-10-12; re-confirmed live 2026-10-14 session 38; compositor state re-checked
 2026-10-15 sessions 47, 48, 49 and 55)
 - Gentoo Linux, kernel 6.18.54, gcc 15.3.0, pkg-config 3.0.7.
@@ -1840,11 +1871,11 @@ message; committed and pushed as `b451d87`.
    has the bitmap-only Noto CBDT font; and a cluster that HarfBuzz renders as more than one glyph is
    deliberately rejected (`ng == 1` check) and falls back to mono, which is the right behaviour but is
    untested against a font that does it.
-6. Git: the tree is committed and pushed (the sessions 56-62 work went in during session 62; see its
-   Progress entry for the commit and the push result). `origin` is still
-   `https://github.com/K-code-AI/K-Term` — the GitHub-side rename is the user's call, then
-   `git remote set-url origin https://github.com/K-code-AI/Kai-Term`. Keep committing verified work and keep
-   `bin/`/`build/` out of it; `git fetch` before pushing, the user commits on GitHub too.
+6. Git: the tree is committed and pushed — the sessions 56-62 work went in as `d05c817` during session 62 and
+   `origin/main` == `main` == that commit (see the session-62 Progress entry). `origin` is
+   `https://github.com/K-code-AI/Kai-Term` (the user renamed the repository; verified with `git remote -v`
+   and a successful push on 2026-10-16). Keep committing verified work and keep `bin/`/`build/` out of it;
+   `git fetch` before pushing, the user commits on GitHub too.
 
 ## Project Files
 ```
@@ -1945,8 +1976,9 @@ exist). Bug root causes are in ISSUES.md "Fixed". The decisions below are projec
   copyright + permission notice in all copies, so `LICENSE` must ship with any redistribution. No
   source-file SPDX headers exist; if added they must read `SPDX-License-Identifier: MIT`.
 - **Git:** the project IS on GitHub now (the user set this up after session 49). Remote `origin =
-   https://github.com/K-code-AI/K-Term`, branch `main`, and the agent has push access (the user said so
-   explicitly on 2026-10-15). Before session 50 there were two commits, both named "Initial commit"
+   https://github.com/K-code-AI/Kai-Term` (renamed from `.../K-Term` by the user; verified by `git remote -v`
+   and a successful push on 2026-10-16, session 62), branch `main`, and the agent has push access (the user
+   said so explicitly on 2026-10-15). Before session 50 there were two commits, both named "Initial commit"
    (`739013c` = .gitignore + LICENSE, `18b9732` = the 15 source/doc files). Session 50 added the cleanup
    commit. The old "zero commits, nothing is pushed without the user" rule is OBSOLETE — but still run
    `git log --oneline` / `git status` before assuming anything is committed, and never commit `bin/` or
