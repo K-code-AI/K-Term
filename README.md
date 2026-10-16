@@ -233,7 +233,7 @@ default `Ctrl+Shift`, pressing `Ctrl+Shift+3` shows the third session.
 ## Documentation
 
 - [ISSUES.md](ISSUES.md) — Known limitations and outstanding issues.
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — Internal design and implementation details.
+- [AGENT.md](AGENT.md) — Development journal: current state, design invariants and known pitfalls.
 - [LICENSE](LICENSE) — MIT License.
 
 ## License

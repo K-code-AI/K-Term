@@ -2,6 +2,11 @@
 bin/
 build/
 
+# Host-system notes do not belong in the project (they moved to
+# /home/kaida/Project/ENVIRONMENT.md, outside this repo). The guard keeps a
+# docs/ARCHITECTURE.md from creeping back in.
+docs/ARCHITECTURE.md
+
 # Object files and compiler by-products, wherever they appear
 *.o
 *.obj

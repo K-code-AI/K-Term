@@ -1,7 +1,14 @@
 # Kai-Term — Known Issues
 
 Read this before starting work. Root causes are kept short — enough to reproduce and to avoid
-re-introducing the bug. Module design is in docs/ARCHITECTURE.md.
+re-introducing the bug. Module design and the invariants a change must not break are in AGENT.md
+("Architecture & Invariants").
+
+> **Docs moved 2026-10-16 (session 63):** `docs/ARCHITECTURE.md` no longer exists — it carried facts about
+> the host machine, so it was removed from the project. Its invariants are now in AGENT.md
+> "Architecture & Invariants", its tooling/host parts are in `/home/kaida/Project/ENVIRONMENT.md` (outside
+> this repo). Entries under "Fixed" still name the old file where they were written against it; that is the
+> record of what was really done, not a pointer to read.
 
 > **Renamed 2026-10-16 (session 59):** the project, binary, config file and app id are now `Kai-Term` /
 > `kai-term` (was `K-Term` / `k-term`). Everything below is written with the new names EXCEPT verbatim
@@ -98,8 +105,8 @@ Not bugs — current behaviour the user has to know about. (Root causes of actua
   (`cols = w / cell_w`), so unless the window is an exact multiple of the cell, `w % cell_w` px and
   `h % cell_h` px are left over (e.g. 3 x 8 px on a 1253x1002 window with a 10x18 cell). They are painted
   with the configured `background`, exactly like the `padding` margin, and stay at the bottom/right:
-  the grid is anchored at the top-left so `ptr / cell` names the right cell (see docs/ARCHITECTURE.md,
-  "Window geometry"). The bottom margin is therefore `padding` + the vertical remainder.
+  the grid is anchored at the top-left so `ptr / cell` names the right cell (see AGENT.md,
+  "Architecture & Invariants — Geometry"). The bottom margin is therefore `padding` + the vertical remainder.
 * **Color emoji come from whatever color font fontconfig finds.** With a bitmap-only font
   (Noto Color Emoji on this box) there is a single 128px strike, so zoomed emoji are scaled from that
   one strike instead of being re-rendered. At most `CLUSTER_MAX` = 8 modifier codepoints fold into one
@@ -114,7 +121,7 @@ Not bugs — current behaviour the user has to know about. (Root causes of actua
   it on the system clipboard. This is the most likely cause of a "Kai-Term has its own clipboard" report:
   the copy never left Kai-Term because it was never offered. The clipboard itself is the ordinary Wayland
   selection (`wl_data_device`), shared with every other client — verified in both directions (see
-  docs/ARCHITECTURE.md, "Clipboard is push-based").
+  AGENT.md, "Architecture & Invariants — Wayland/input invariants").
 * **Kai-Term offers only `text/plain` when copying** (and asks for one mime type when pasting). Real clients
   usually advertise `UTF8_STRING`, `text/plain;charset=utf-8`, `TEXT` and `STRING` as well; niri hands
   those over to a `text/plain` request without trouble, so this works here, but a compositor that matches
