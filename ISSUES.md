@@ -19,24 +19,24 @@ re-introducing the bug. Module design and the invariants a change must not break
 
 The four items that used to be numbered **Open #1-#4** are cleared at the user's request: none of them was
 ever reproduced here, and the user is not convinced they are Kai-Term defects rather than
-environment/compositor behaviour. Cleared is NOT fixed - nothing was verified as a fix, so they do not belong
+environment/compositor behaviour. Cleared is NOT fixed — nothing was verified as a fix, so they do not belong
 under "Fixed". Anything seen again should be re-filed as a new Open item with a reproduction. One line each,
 kept so a re-report starts from the measurements that already exist. (The session-42 dismissal of the
-`0x505`/`0x3000` lines as probe-harness artifacts was withdrawn in session 52 - the user did see them in
-normal use - so "cleared" here means unproven, not disproven.)
+`0x505`/`0x3000` lines as probe-harness artifacts was withdrawn in session 52 — the user did see them in
+normal use — so "cleared" here means unproven, not disproven.)
 
-- **Open #1 - second instance: `atlas glTexImage2D failed: 0x505 (512x512)`, then SIGSEGV** (user report,
+- **Open #1 — second instance: `atlas glTexImage2D failed: 0x505 (512x512)`, then SIGSEGV** (user report,
   2026-10-15, with a `kai-term` left running in the background). `0x505` is `GL_INVALID_VALUE` at the mono
   atlas upload in `render_draw` (src/render.c): the first frame that has glyphs to draw. Never reproduced
-  here - two launches in a row both work when no instance is left over.
-- **Open #2 - `eglSwapBuffers failed: 0x3000` on launch** plus one `swap failed (1 in a row)` warning (user
+  here — two launches in a row both work when no instance is left over.
+- **Open #2 — `eglSwapBuffers failed: 0x3000` on launch** plus one `swap failed (1 in a row)` warning (user
   report, 2026-10-15). `0x3000` is `EGL_BAD_ALLOC`. No visible effect: the 8 ms timer retries, and the
   frame-pacing code already keeps the frame dirty and arms no frame callback after a failed swap.
-- **Open #3 - LeakSanitizer reports only third-party frames** (libdbus-1, libwayland-client, dynamically
+- **Open #3 — LeakSanitizer reports only third-party frames** (libdbus-1, libwayland-client, dynamically
   loaded driver modules). A hand-built ASan `kai-term` over a full multi-session run (session 61): no
   AddressSanitizer error, no UBSan runtime error, 1250 bytes leaked in 5 allocations, none from Kai-Term
   source. Not a Kai-Term bug.
-- **Open #4 - fullscreen freezes the display, INTERMITTENT** (user report, session 58; "doesn't always
+- **Open #4 — fullscreen freezes the display, INTERMITTENT** (user report, session 58; "doesn't always
   reproduce", deferred by the user on 2026-10-16). Never reproduced here. The mechanism behind the earlier,
   confirmed version of this bug and the levers for detecting it (`toplevel state: fullscreen 1 …` with no
   matching `configure answered:` line, a `swap failed (N in a row)` streak, `cat /proc/<pid>/wchan` =

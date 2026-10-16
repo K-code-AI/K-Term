@@ -187,7 +187,8 @@ or re-file one of the cleared reports with a reproduction if the user hits it ag
      allocations, none from Kai-Term source); the fullscreen-freeze detection levers. They are NOT under
      "Fixed" — nothing was verified as a fix — and the section says plainly that "cleared" means unproven,
      not disproven (the withdrawn session-42 dismissal is noted). The `Open #1`-`#4` labels are kept so dated
-     entries that cite them still resolve. ISSUES.md 705 -> 673 lines.
+     entries that cite them still resolve. ISSUES.md 705 -> 673 lines; the new section's dashes were matched
+     to the em-dash style the rest of the file uses.
   2. Cross-references that would otherwise dangle: the "Fixed: Fullscreen" entry now reads "was tracked as
      Open #4 and cleared unproven on 2026-10-17"; AGENT.md Current Status gained a "No open issues" bullet;
      Next Steps #1 no longer lists three open bugs; the Project Files tree and README's Documentation line no
