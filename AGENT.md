@@ -44,9 +44,10 @@ a tab bar and a side-by-side pane view). No GUI framework.
   change, color emoji + grapheme clusters, whole-glyph selection with no band over unwritten space,
   compositor transparency, CSI 3 J + startup directory, bracketed paste, client-side key repeat, the
   draw/commit + event-loop pacing rules.
-- Git: committed and pushed. `origin = https://github.com/K-code-AI/Kai-Term`, branch `main`, HEAD is the
-  session-62 handoff commit; the sessions 56-62 work went in as `d05c817`. `git fetch` before pushing — the
-  user commits on GitHub too. Never commit `bin/` or `build/`.
+- Git: `origin = https://github.com/K-code-AI/Kai-Term`, branch `main`. The sessions 56-62 work went in as
+  `d05c817` and is pushed; the session-63 docs cleanup is `3351214`, committed but NOT yet pushed
+  (`main` is ahead of `origin/main` by 1 — the user did not ask for a push). `git fetch` before pushing
+  — the user commits on GitHub too. Never commit `bin/` or `build/`.
 
 ## Current Task
 
@@ -158,14 +159,23 @@ Open, in priority order (details and reproduction in ISSUES.md "Open"):
      pointers are kept.
   5. README.md and ISSUES.md references to the deleted file fixed (they now point here); `.gitignore` gained
      a `docs/ARCHITECTURE.md` guard so it cannot creep back; the now-empty `docs/` directory is gone.
-  RESULT: AGENT.md 2067 -> 476 lines (189 KB -> 41 KB). No host inventory or tooling guide remains inside
+  RESULT: AGENT.md 2067 -> 491 lines (189 KB -> 42 KB). No host inventory or tooling guide remains inside
   the repo — ISSUES.md still names the compositor and the installed emoji font where a bug report needs
   them, which is project documentation, not an environment guide. Every CURRENT-STATE reference to
   `docs/ARCHITECTURE.md` is gone; the only remaining mentions are the ISSUES.md note explaining the removal
   and the historical entries under "Fixed", which record what was really done. Build/test status above is
   re-measured, not inherited.
-  NEXT ACTION: commit the doc changes, then ask the user to look at the tab bar / side-by-side view and to
-  pick the next issue (#1, #2 or #4).
+  6. Re-verified from a CLEAN tree after the doc changes: `make clean && make` -> exit 0, 0 warnings;
+     `make test` -> `501 checks, 0 failures` + `MODEL OK (0 problems)` + `CLI: 86 checks, 0 failures,
+     0 skipped`; `make asan` -> `501 checks, 0 failures` + `MODEL OK`, no sanitizer report
+     (`/tmp/s63/final_build.log`, `final_test.log`, `final_asan.log`). The probe grep over
+     `src/ include/ tests/` still returns nothing.
+  7. Committed as `3351214` (`.gitignore`, `AGENT.md`, `ISSUES.md`, `README.md` modified,
+     `docs/ARCHITECTURE.md` deleted), followed by this journal's handoff update. Nothing from `bin/` or
+     `build/` was staged. `git status -sb` shows `## main...origin/main [ahead 2]` — NOT pushed: the user
+     did not ask for a push this session, so it waits for their go-ahead.
+  NEXT ACTION: ask whether to `git push origin main`; then ask the user to look at the tab bar /
+  side-by-side view in their own window and to pick the next issue (#1, #2 or #4).
 
 ## Next Steps
 
