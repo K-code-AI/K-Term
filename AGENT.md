@@ -48,33 +48,20 @@ a tab bar and a side-by-side pane view). No GUI framework.
   change, color emoji + grapheme clusters, whole-glyph selection with no band over unwritten space,
   compositor transparency, CSI 3 J + startup directory, bracketed paste, client-side key repeat, the
   draw/commit + event-loop pacing rules.
-- Git: `origin = https://github.com/K-code-AI/Kai-Term`, branch `main`. The sessions 56-62 work went in as
-  `d05c817` and is pushed; the session-63 docs cleanup is `3351214`, committed but NOT yet pushed
-  (`main` is ahead of `origin/main` by 1 — the user did not ask for a push). `git fetch` before pushing
+- Git: `origin = https://github.com/K-code-AI/Kai-Term`, branch `main`. Pushed on 2026-10-17: `d05c817`
+  (sessions 56-62 + the rename), `3351214` (session-63 docs cleanup) and `dbcc597` (session-64 issue
+  clear-out). `main` is in sync with `origin/main` — nothing local is unpushed. `git fetch` before pushing
   — the user commits on GitHub too. Never commit `bin/` or `build/`.
 
 ## Current Task
 
-**In progress (session 64, 2026-10-17): clear the four items in ISSUES.md "Open" and push.**
+**Nothing is in progress.** Session 64 (2026-10-17) closed two things: the user confirmed the tab bar and the
+side-by-side view in their own window ("it works as expected and looks great"), and the four ISSUES.md
+"Open" items were cleared unproven at their request — they sit under "Cleared", NOT under "Fixed", because
+nothing was verified as a fix. Everything is committed and pushed; `main` is in sync with `origin/main`.
 
-USER VERDICT (2026-10-17): the user has looked at the tab bar and the side-by-side view in their own window
-— "it works as expected and looks great". The multiplexing feature is now confirmed by eye as well as by
-log lines. That closes the last open question on sessions 56-62.
-
-OBJECTIVE: the user does not believe the four "Open" items are established Kai-Term defects and wants them
-cleared; they will re-report anything they actually hit again. They are NOT fixes, so they must NOT move to
-"Fixed" (nothing was verified as fixed). Plan:
-1. Replace ISSUES.md "Open" with a short "Cleared" section: one entry per item, kept brief, each stating it
-   was never reproduced here and may be re-filed. Keep the numbers (`Open #1`-`#4`) findable so dated
-   journal entries that cite them still resolve.
-2. Fix the cross-references that would otherwise dangle: ISSUES.md "Fixed" fullscreen entry (cites Open #4),
-   AGENT.md Current Status, Next Steps #1, README's "outstanding issues" line.
-3. Re-verify build/test/asan after the doc edits (docs-only, but status lines must be re-measured, not
-   inherited).
-4. Commit, then `git fetch` and push — the user approved the push this session.
-
-Expected outcome: ISSUES.md has no Open section; the four reports survive only as one-line entries under
-"Cleared"; the journal records the user's visual confirmation and the push.
+Nothing is waiting on the agent. If work resumes, pick from "Next Steps" (housekeeping only — no bug is open),
+or re-file one of the cleared reports with a reproduction if the user hits it again.
 
 ## Progress Journal (condensed; root causes live in ISSUES.md "Fixed")
 
@@ -209,10 +196,16 @@ Expected outcome: ISSUES.md has no Open section; the four reports survive only a
      confirmed by eye, and the "user has not looked at the tab bar" item is gone from Current Task. Next Steps
      #5 now says the `s61/` + `s61_apinject*` scratch probes no longer have to be kept (still outside the
      repo, so nothing was deleted without asking).
+  4. Committed as `dbcc597` — `git status --short` showed only `AGENT.md`, `ISSUES.md`, `README.md` modified,
+     so nothing from `bin/` or `build/` could be staged. `git fetch origin` first: 0 commits behind, so the
+     push was a fast-forward: `git push origin main` -> `8bffde9..dbcc597`, and `git status -sb` then reported
+     `## main...origin/main` with no ahead/behind marker.
   VERIFIED, not inherited — after the doc edits, from a clean tree: `make clean && make` -> exit 0, 0
   warnings; `make test` -> `501 checks, 0 failures` + `MODEL OK (0 problems)` + `CLI: 86 checks, 0 failures,
   0 skipped`; `make asan` -> `501 checks, 0 failures` + `MODEL OK`, no LeakSanitizer/UBSan report. No source,
   header, Makefile or test file was touched — the change set is documentation only.
+  NEXT ACTION: none pending. The tree is clean and pushed. Either pick a housekeeping item from "Next Steps"
+  (no bug is open) or re-file a cleared report if the user hits it again.
 
 ## Next Steps
 
