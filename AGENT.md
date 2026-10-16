@@ -16,7 +16,7 @@ Wayland terminal emulator in C. xdg-shell window + PTY shell + VT/ANSI parser + 
 glyph atlases (alpha8 mono, RGBA8 color emoji), 1 draw call/frame. In-window multiplexing: N sessions per
 window, tab bar, side-by-side panes. No GUI framework.
 
-## Current Status (build/test/asan re-verified 2026-10-17, session 65)
+## Current Status (build/test/asan re-verified 2026-10-17, session 66)
 
 - Clean tree: `make` exit 0, **0 warnings** under `WARN` (`-Wall -Wextra -Wshadow -Wwrite-strings
   -Wformat=2 -Wdiscarded-qualifiers`). `make test` -> **501 checks, 0 failures** + **MODEL OK (0 problems)** +
@@ -36,18 +36,25 @@ window, tab bar, side-by-side panes. No GUI framework.
 - Verified at model+live level (not all re-checked by hand): reflow on width change, color emoji + grapheme
   clusters, whole-glyph selection with no band over unwritten space, compositor transparency, CSI 3 J +
   startup dir, client-side key repeat, draw/commit + event-loop pacing.
-- Git: `origin = https://github.com/K-code-AI/Kai-Term`, `main` in sync with `origin/main` (`d05c817`,
-  `3351214`, `dbcc597`, `a2a5a54`, `1ab9dc8` pushed 2026-10-17). `git fetch` before push — user commits on
-  GitHub too. Never commit `bin/` or `build/`.
+- Git: `origin = https://github.com/K-code-AI/Kai-Term`, branch `main`. Last pushed is `1ab9dc8`; everything
+  since (`867d50e`, `d5afe4a`, `a59e7ae` and the journal commits after them) is **local only — not pushed**,
+  nobody asked for a push. Do not write an ahead-count here: the commit recording it makes it wrong. Read it
+  with `git status -sb`. `git fetch` before push — user commits on GitHub too. Never commit `bin/` or
+  `build/`.
 
 ## Current Task
 
 **Nothing in progress** (s66 closed: ISSUES.md gutted to current+verified info only — see the s66 journal
 entry). ISSUES.md is now 100 lines / 1149 words, from 673 / 9059.
 
-One loose end for the user to decide: `src/font.c` lines 529 and 794 still claim a "128px" emoji strike and
-the fallback constant at line 574 is 128, but the installed NotoColorEmoji.ttf has a single 56px strike
-(measured). Source-comment fix, not docs — not done unasked.
+Two loose ends for the user to decide, both source changes, so not done unasked:
+
+- `src/font.c` lines 529 and 794 still claim a "128px" emoji strike and the fallback constant at line 574 is
+  128, but the installed NotoColorEmoji.ttf has a single 56px strike (measured).
+- 6 code comments still cite ISSUES.md sections that `a59e7ae` deleted: `ISSUES.md #4` at
+  `include/kai-term/kai-term.h:192`, `src/vt.c:494`, `tests/dbg.c:158`, `tests/test_vt.c:438`, and
+  `ISSUES.md "Fixed"` at `src/main.c:187` and `src/main.c:647`. They now point at nothing — the root causes
+  they mean are in `git show d5afe4a:ISSUES.md`.
 
 NEXT ACTION: pick from "Next Steps" (housekeeping — no bug is open), or file a problem with a reproduction.
 
@@ -178,6 +185,21 @@ NEXT ACTION: pick from "Next Steps" (housekeeping — no bug is open), or file a
   a source change — left for the user to approve.
   Docs only — no source, header, Makefile or test file touched. `make`/`make test`/`make asan` re-run from a
   clean tree afterwards; numbers in Current Status are those runs.
+
+- **2026-10-17, s66b — s66 work committed, verification re-run independently.** `git status` showed AGENT.md,
+  ISSUES.md and README.md modified but uncommitted (the s66 work above); that was the outstanding commit.
+  Re-ran the verification myself from a clean tree instead of trusting the entry: `make clean && make` exit 0
+  with 0 warnings; `make test` -> 501 checks 0 failures + MODEL OK + CLI 86/0/0; `make asan` -> 501/0 +
+  MODEL OK, no sanitizer report; probe grep empty; only `TODO|FIXME|XXX|HACK` hit is the `XXXXXXXXXX` payload
+  at tests/test_vt.c:667. Counts the entry claims also confirmed: `git show d5afe4a:ISSUES.md` = 673 lines
+  with 54 `## Fixed` entries and 4 `Cleared` items; new ISSUES.md = 100 lines / 1149 words with 19 limitation
+  bullets (19 before -> 19 after, none lost).
+  Committed `a59e7ae` (3 files, +148/-686). NOT pushed — user asked for the commit only; `main` is 3 ahead.
+  NEW FINDING while checking cross-refs: 6 code comments still cite ISSUES.md sections this commit deleted
+  (listed under Current Task). s66's "dangling refs fixed" covered the docs, which is what it claimed, but the
+  code side is still dangling — a source change, so left for the user.
+  Dating note: `date` on this host reports 2026-10-16 while sessions 64-66 are dated 2026-10-17 — journal
+  convention and the host clock disagree. Keep the journal's convention; do not rewrite past entries.
 
 ## Next Steps
 
