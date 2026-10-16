@@ -1,11 +1,11 @@
-/* K-Term — FreeType glyph atlas (alpha8 texture data) + color emoji atlas (RGBA8).
+/* Kai-Term — FreeType glyph atlas (alpha8 texture data) + color emoji atlas (RGBA8).
  *
  * Mono glyphs: fontconfig fallback lookup -> FreeType raster -> alpha8 atlas.
  * Color emoji: the whole grapheme cluster is shaped by HarfBuzz into ONE glyph id of a color
  * emoji font (Noto Color Emoji: a CBDT/CBLC bitmap-only face), whose premultiplied BGRA bitmap
  * is converted to RGBA and packed into a second atlas. Metrics stay UNSCALED (the strike's own
  * pixel size); the renderer scales them per frame, so zoom never re-rasterizes an emoji. */
-#include "k-term.h"
+#include "kai-term.h"
 
 #include <fontconfig/fontconfig.h>
 #include <ft2build.h>

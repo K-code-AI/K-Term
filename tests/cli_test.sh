@@ -1,15 +1,15 @@
 #!/bin/sh
-# K-Term command-line regression suite (make test-cli).
+# Kai-Term command-line regression suite (make test-cli).
 #
 # WHY A SCRIPT AND NOT A C TEST: the option parser lives in main() in src/main.c, and src/main.c is
 # deliberately not linked into bin/test_vt (it pulls in Wayland, EGL and a PTY). So argv can only be
 # checked by RUNNING the real binary and asserting on its output and exit status.
 #
-# Usage: tests/cli_test.sh [path/to/k-term]     (default ./bin/k-term)
+# Usage: tests/cli_test.sh [path/to/kai-term]     (default ./bin/kai-term)
 # Prints "CLI: <n> checks, <m> failures" and exits non-zero if anything failed.
 # Checks that would open a window are skipped when there is no Wayland session; the skip is reported.
 
-BIN=${1:-./bin/k-term}
+BIN=${1:-./bin/kai-term}
 if [ ! -x "$BIN" ]; then
     echo "cli_test: no executable at '$BIN' (run make first)" >&2
     exit 1
@@ -91,7 +91,7 @@ run -h; help_short="$out"
 ck "$help_long" "$help_short" "--help output equals -h"
 run -v
 ck "$rc" 0 "-v exit status"
-ck "$(printf '%s\n' "$out" | grep -c '^k-term ')" 1 "-v prints a version line"
+ck "$(printf '%s\n' "$out" | grep -c '^kai-term ')" 1 "-v prints a version line"
 run --version
 ck "$rc" 0 "--version exit status"
 
@@ -101,7 +101,7 @@ ck "$rc" 0 "--version exit status"
 for flag in -C -f -s -r -o -x --bogus; do
     run_split "$flag" 42
     ck "$rc" 1 "$flag rejected with exit 1"
-    ck "$(printf '%s\n' "$stderr_only" | sed -n '1p')" "k-term: unknown option '$flag'" \
+    ck "$(printf '%s\n' "$stderr_only" | sed -n '1p')" "kai-term: unknown option '$flag'" \
        "$flag generic first line"
     ck "$(printf '%s\n' "$stderr_only" | grep -c '^usage:')" 1 "$flag prints the option list"
     ck "$(printf '%s\n' "$stderr_only" | grep -c 'any more')" 0 "$flag mentions no retired flag"
@@ -113,7 +113,7 @@ for flag in -e -w -c --exec --workingdir --config; do
     run_split "$flag"
     ck "$rc" 1 "$flag with no argument exits 1"
     # the message echoes the flag exactly as the user typed it
-    ck "$(printf '%s\n' "$stderr_only" | sed -n '1p')" "k-term: $flag needs an argument" \
+    ck "$(printf '%s\n' "$stderr_only" | sed -n '1p')" "kai-term: $flag needs an argument" \
        "$flag with no argument message"
 done
 
@@ -143,10 +143,30 @@ if [ "$have_display" = 1 ]; then
     run -d -e "echo cli-marker"
     ck "$rc" 0 "-e COMMAND runs"
     # the shell exits, so either the pty reaches EOF first or SIGCHLD is reaped first; either way the
-    # run must end by itself rather than timing out.
-    ck "$(printf '%s\n' "$out" | grep -cE 'pty closed|child exited')" 1 "-e COMMAND ends on its own"
+    # run must end by itself rather than timing out. With multiplexing the message names the tab.
+    ck "$(printf '%s\n' "$out" | grep -cE 'mux: the pty of tab [0-9]+/[0-9]+ closed|mux: the shell of tab [0-9]+/[0-9]+ exited')" 1 "-e COMMAND ends on its own"
     run -d -e true
-    ck "$(printf '%s\n' "$out" | grep -c 'k-term exiting')" 1 "a plain run shuts down cleanly"
+    ck "$(printf '%s\n' "$out" | grep -c 'kai-term exiting')" 1 "a plain run shuts down cleanly"
+
+    # multiplexing settings: config-only keys, and the first session must be reported
+    printf 'max_tabs = 4\nkey_new_tab = Alt+N\nkey_close_tab = none\nkey_tab_prefix = Alt\n' > "$tmp/muxconf"
+    run -c "$tmp/muxconf" -d -e true
+    ck "$rc" 0 "a config with the multiplexing keys runs"
+    ck "$(printf '%s\n' "$out" | grep -c 'unknown key')" 0 "the multiplexing config keys are known"
+    ck "$(printf '%s\n' "$out" | grep -c 'config: key_close_tab unbound')" 1 "key_close_tab = none unbinds it"
+    ck "$(printf '%s\n' "$out" | grep -c 'mux: session 1/1 started')" 1 "the first session is logged"
+
+    # how the sessions are SHOWN (session 57): the tab bar, the split cap and the toggle binding.
+    # The `layout:` line is what layout_apply() logs once per layout-shape change, so it is the
+    # client-side evidence that the bar really is on/off and how many panes the window has.
+    printf 'tab_bar = always\nsplit_max = 2\nkey_toggle_layout = none\n' > "$tmp/barconf"
+    run -c "$tmp/barconf" -d -e true
+    ck "$rc" 0 "a config with the display keys runs"
+    ck "$(printf '%s\n' "$out" | grep -c 'unknown key')" 0 "the display config keys are known"
+    ck "$(printf '%s\n' "$out" | grep -c 'config: key_toggle_layout unbound')" 1 "key_toggle_layout = none unbinds the toggle"
+    ck "$(printf '%s\n' "$out" | grep -c 'layout: tab view, 1 pane, tab bar on, grid')" 1 "tab_bar = always shows the bar with one session"
+    run -d -e true
+    ck "$(printf '%s\n' "$out" | grep -c 'layout: tab view, 1 pane, tab bar off, grid')" 1 "tab_bar = auto (the default) shows no bar with one session"
 
     # everything at once
     run -c "$tmp/conf" -d -w "$tmp" -e true
@@ -155,7 +175,7 @@ if [ "$have_display" = 1 ]; then
     ck "$(printf '%s\n' "$out" | grep -c "shell starts in $tmp")" 1 "combined: -w applied"
 else
     for name in "-c FILE" "--config FILE" "--config=FILE" "-d overrides log" "-w DIR" "-e COMMAND" \
-                "combined flags"; do
+                "multiplexing keys" "display keys (tab_bar/split_max)" "combined flags"; do
         skip "$name" "no WAYLAND_DISPLAY"
     done
 fi

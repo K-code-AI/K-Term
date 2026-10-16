@@ -1,10 +1,10 @@
-/* K-Term — VT/ANSI parser, grid, scrollback. */
-#include "k-term.h"
+/* Kai-Term — VT/ANSI parser, grid, scrollback. */
+#include "kai-term.h"
 
 #include <errno.h>
 #include <unistd.h>
 
-int k_term_loglevel = L_WARN;
+int kai_term_loglevel = L_WARN;
 
 /* forward declarations for terminal ops used before definition */
 static void scroll_up(Term *t, int top, int bot);
@@ -19,11 +19,11 @@ static void alt_screen_leave(Term *t, int restore_cursor);
 void klog(int level, const char *fmt, ...)
 {
     static const char *pfx[] = { "error", "warn", "info", "debug" };
-    if (level > k_term_loglevel)
+    if (level > kai_term_loglevel)
         return;
     va_list ap;
     va_start(ap, fmt);
-    fprintf(stderr, "k-term %s: ", pfx[level]);
+    fprintf(stderr, "kai-term %s: ", pfx[level]);
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
     va_end(ap);
@@ -238,7 +238,7 @@ static void grid_blank_slot(Grid *g, int i, uint32_t bg)
    lifetime (rows_at_init + scrollback_max), so a window that becomes TALLER than the initial row count
    eats into the scrollback: the usable limit is rcap - rows, not scrollback_max. Every bound on
    scroll_off/live_off must use this. Using scrollback_max after the viewport grew is what made
-   scroll_up blank row[rcap] (heap-buffer-overflow, found by an ASan build of k-term with `seq 1 5000`:
+   scroll_up blank row[rcap] (heap-buffer-overflow, found by an ASan build of kai-term with `seq 1 5000`:
    30 configured rows -> a 62-row window -> so saturates at 1968 while scrollback_max still says 2000). */
 static int sb_limit(const Grid *g)
 {
@@ -599,6 +599,24 @@ void grid_destroy(Grid *g)
     free(g->row);
     free(g->wrap);
     memset(g, 0, sizeof(*g));   /* also clears valid: the grid is gone */
+}
+
+/* ---------------- mouse button mapping ----------------
+   wl_pointer.button delivers the kernel's BTN_* codes, and the terminal protocols number the buttons
+   differently: SGR (1006) and legacy X10 both want 0 = left, 1 = middle, 2 = right, while the BTN_*
+   values run LEFT 0x110, RIGHT 0x111, MIDDLE 0x112. Switching on the raw codes in their definition
+   order therefore reports a right click as the middle button and vice versa — which is exactly the bug
+   this function exists to prevent (it made a middle click on the tab bar do nothing and a RIGHT click
+   close the session). Kept here, next to the mouse_mode state it belongs to, so tests/test_vt.c can pin
+   it: main.c is linked into no test binary. */
+int mouse_sgr_button(uint32_t evdev_code)
+{
+    switch (evdev_code) {
+    case EVDEV_BTN_LEFT:   return 0;
+    case EVDEV_BTN_MIDDLE: return 1;
+    case EVDEV_BTN_RIGHT:  return 2;
+    default:               return 3;   /* BTN_SIDE / BTN_EXTRA / anything unknown */
+    }
 }
 
 /* ---------------- terminal core ---------------- */
@@ -1163,7 +1181,7 @@ static void erase_cells(Term *t, int y, int x0, int x1)
     }
 }
 
-/* CSI 3 J setting (see k-term.h). Default ON; main.c applies the configured value. */
+/* CSI 3 J setting (see kai-term.h). Default ON; main.c applies the configured value. */
 static int g_clear_scrollback = 1;
 
 void term_set_clear_scrollback(int on)
@@ -1171,7 +1189,7 @@ void term_set_clear_scrollback(int on)
     g_clear_scrollback = on ? 1 : 0;
 }
 
-/* Build the bytes a paste of `text` is sent to the PTY as (see k-term.h). With bracketed paste mode
+/* Build the bytes a paste of `text` is sent to the PTY as (see kai-term.h). With bracketed paste mode
    on, the block is delimited by ESC[200~ / ESC[201~: bash/zsh/readline/vim then insert it literally,
    newlines included, instead of letting every CR run a command. The delimiters are written as three
    separate writes by the caller so a huge paste never needs a buffer holding prefix+text+suffix. */

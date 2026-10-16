@@ -1,5 +1,5 @@
-# K-Term build
-# Layout: src/*.c -> build/*.o -> bin/k-term ; tests/*.c -> bin/test_vt, bin/dbg
+# Kai-Term build
+# Layout: src/*.c -> build/*.o -> bin/kai-term ; tests/*.c -> bin/test_vt, bin/dbg
 # Generated Wayland bindings live in build/generated/ (created by wayland-scanner).
 
 CC      ?= cc
@@ -9,17 +9,17 @@ PKG     := wayland-client wayland-cursor wayland-egl egl gl xkbcommon freetype2 
 # file is not ours to fix.
 WARN    := -Wall -Wextra -Wshadow -Wwrite-strings -Wformat=2 -Wdiscarded-qualifiers
 CFLAGS  ?= -O2 -std=gnu11 $(WARN)
-CFLAGS  += -D_GNU_SOURCE $(shell pkg-config --cflags $(PKG)) -Iinclude/k-term -Ibuild/generated
+CFLAGS  += -D_GNU_SOURCE $(shell pkg-config --cflags $(PKG)) -Iinclude/kai-term -Ibuild/generated
 LDLIBS  += $(shell pkg-config --libs $(PKG)) -lm
 
 PROTO   := /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml
-SRCS    := src/config.c src/vt.c src/pty.c src/font.c src/render.c src/main.c
+SRCS    := src/config.c src/vt.c src/mux.c src/layout.c src/pty.c src/font.c src/render.c src/main.c
 OBJS    := $(patsubst src/%.c,build/%.o,$(SRCS))
 GENH    := build/generated/xdg-shell-client-protocol.h
 GENC    := build/generated/xdg-shell-protocol.c
-HDRS    := include/k-term/k-term.h $(GENH)
+HDRS    := include/kai-term/kai-term.h $(GENH)
 
-BIN     := bin/k-term
+BIN     := bin/kai-term
 
 all: $(BIN)
 
@@ -42,10 +42,10 @@ build/%.o: src/%.c $(HDRS) | build
 $(BIN): $(OBJS) build/xdg-shell-protocol.o | bin
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-bin/test_vt: tests/test_vt.c build/vt.o build/config.o | bin
+bin/test_vt: tests/test_vt.c build/vt.o build/mux.o build/layout.o build/config.o | bin
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-bin/dbg: tests/dbg.c build/vt.o build/config.o | bin
+bin/dbg: tests/dbg.c build/vt.o build/mux.o build/layout.o build/config.o | bin
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 test: bin/test_vt bin/dbg test-cli
@@ -64,11 +64,11 @@ ASANFLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer -g
 # header they consume must be a prerequisite. bin/dbg_asan used to list only tests/dbg.c, which
 # left a stale binary on disk: an ASan leak kept being reported from an old src/vt.c that make
 # never rebuilt.
-bin/test_vt_asan: tests/test_vt.c src/vt.c src/config.c $(HDRS) | bin
-	$(CC) $(CFLAGS) $(ASANFLAGS) -o $@ tests/test_vt.c src/vt.c src/config.c $(LDLIBS)
+bin/test_vt_asan: tests/test_vt.c src/vt.c src/mux.c src/layout.c src/config.c $(HDRS) | bin
+	$(CC) $(CFLAGS) $(ASANFLAGS) -o $@ tests/test_vt.c src/vt.c src/mux.c src/layout.c src/config.c $(LDLIBS)
 
-bin/dbg_asan: tests/dbg.c src/vt.c src/config.c $(HDRS) | bin
-	$(CC) $(CFLAGS) $(ASANFLAGS) -o $@ tests/dbg.c src/vt.c src/config.c $(LDLIBS)
+bin/dbg_asan: tests/dbg.c src/vt.c src/mux.c src/layout.c src/config.c $(HDRS) | bin
+	$(CC) $(CFLAGS) $(ASANFLAGS) -o $@ tests/dbg.c src/vt.c src/mux.c src/layout.c src/config.c $(LDLIBS)
 
 asan: bin/test_vt_asan bin/dbg_asan
 	./bin/test_vt_asan

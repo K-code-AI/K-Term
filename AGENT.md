@@ -1,27 +1,44 @@
-# K-Term — Agent Journal
+# Kai-Term — Agent Journal
 
 Read this (plus ISSUES.md) before touching the project. Bug root causes live in ISSUES.md,
 module design in docs/ARCHITECTURE.md, user-facing behaviour in README.md. This file keeps only
 the current verified state, the environment facts, the pitfalls a newcomer must know, and a
 short history.
 
+> **Renamed 2026-10-16 (session 59):** the project is `Kai-Term` (binary `kai-term`, header
+> `include/kai-term/kai-term.h`, config `~/.config/kai-term/kai-term.conf`, app id `Kai-Term`). It used to
+> be `K-Term`/`k-term`. The current-state sections below use the new names; the dated Progress and History
+> entries keep the names they were written with, because they record commands that were really run and log
+> lines that were really printed. Quoted user sentences are kept verbatim too.
+
 ## Project Overview
-K-Term is a lightweight Linux terminal emulator for Wayland written in C: native Wayland window
+Kai-Term is a lightweight Linux terminal emulator for Wayland written in C: native Wayland window
 (xdg-shell) + PTY shell + VT/ANSI parser + EGL/OpenGL text rendering from two glyph atlases (alpha8
 mono + RGBA8 color emoji) in one draw call per frame. No GUI framework.
 
-## Current Status (build/test/asan re-verified 2026-10-15, session 55)
+## Current Status (build/test/asan re-verified 2026-10-16, session 62)
 - Clean tree: `make` -> zero warnings under the Makefile's `WARN` set (`-Wall -Wextra -Wshadow
   -Wwrite-strings -Wformat=2 -Wdiscarded-qualifiers`, tightened in session 50; the tree is also clean
   under `-Wcast-qual -Wmissing-prototypes -Wstrict-prototypes -Wold-style-definition -Wredundant-decls`
   except inside the generated xdg-shell bindings, which is why `-Wcast-qual` is not in `WARN`);
-  `make test` -> `364 checks, 0 failures` + `MODEL OK (0 problems)` + `CLI: 77 checks, 0 failures, 0
-  skipped`; `make asan` -> `364 checks, 0 failures` + `MODEL OK`, with NO LeakSanitizer/UBSan report.
+  `make test` -> `501 checks, 0 failures` + `MODEL OK (0 problems)` + `CLI: 86 checks, 0 failures, 0
+  skipped`; `make asan` -> `501 checks, 0 failures` + `MODEL OK`, with NO LeakSanitizer/UBSan report.
   No temporary probe or experiment remains in the tree (`grep -rnE "TEMPORARY|PROBE|EXPERIMENT|NEGATIVE"
-  src/ include/ tests/` -> nothing). Re-run from a clean tree by session 55 (`make clean && make` 0
-  warnings `/tmp/s55_build.log`, `make test` `/tmp/s55_test.log`, `make asan` `/tmp/s55_asan.log`);
-  README's flags table (`-e -w -c -d -v -h`) and its 18 settings rows match `src/main.c` and
-  `src/config.c`.
+  src/ include/ tests/` -> nothing). Re-run from a clean tree by session 62 (`make clean && make` 0
+  warnings `/tmp/s62_base_build.log`, `make test` `/tmp/s62_base_test.log`, `make asan`
+  `/tmp/s62_base_asan.log`); README's flags table (`-e -w -c -d -v -h`) and its 27 settings rows match
+  `src/main.c` and `src/config.c`.
+- **Multiplexing, the tab bar and the side-by-side view (sessions 56-62) are implemented, built, unit-tested
+  and verified live by log lines — NOT yet confirmed by the user by eye.** What is proven here: `Ctrl+Shift+T`
+  opens a session, `Ctrl+Shift+Right/Left` switch, `Ctrl+Shift+1`…`9` jump, `Ctrl+Shift+S` flips tab view and
+  side-by-side view, `Ctrl+Shift+W` closes one and closing the last exits — all logged as `mux:` / `layout:` /
+  `grid resized` lines by `.scratch/s61/tabs.sh`, and again under an ASan build of the binary itself with no
+  sanitizer error. A LEFT click on a bar item switches and a MIDDLE click closes, proven with the absolute
+  pointer injector (`.scratch/s61/barclick.sh`). 501 unit checks cover mux (tab bookkeeping, `mux_title`, the
+  `ps.t` re-arm), the key-binding parser, the config keys, `layout_compute` (bar strip, item rects, labels,
+  pane rects, the hit tests, `layout_grid_size`, `layout_initial_size`) and `mouse_sgr_button`. What is NOT
+  proven by any of that: that the bar LOOKS right, that the labels are legible, that the focus border is where
+  it should be — the user verifies anything visual themselves.
 - **Zoom no longer leaves stale prompt lines — CONFIRMED BY THE USER** (session 54: "Zoom is fixed and
   now works as expected"). Root cause + evidence: ISSUES.md "Fixed: Zooming in and out left stale prompt
   lines and uneven gaps". 23 checks in tests/test_vt.c + `zoom-*`/`alt-*` stages in tests/dbg.c; the
@@ -48,7 +65,7 @@ mono + RGBA8 color emoji) in one draw call per frame. No GUI framework.
   `scrollback_max` is not reduced when the viewport grows. `sb_limit() = min(scrollback_max, rcap - rows)`
   is now the single bound. 11 new checks (312 -> 323) + `tests/dbg.c` stages that reproduce the identical
   ASan error against the pre-fix `vt.c`; the live 5000-line run now exits cleanly 3/3, also under an ASan
-  build of k-term itself.
+  build of kai-term itself.
 - **Fullscreen (`NextFeature.md` #2) is DONE — CONFIRMED BY THE USER** (2026-10-15: fullscreen refreshes
   properly). The session-46 draw/commit rules plus the session-47 event-loop fix are what make it work;
   ISSUES.md now carries it under "Fixed", not "Open".
@@ -72,6 +89,151 @@ mono + RGBA8 color emoji) in one draw call per frame. No GUI framework.
   scrollback than configured (`rcap` is fixed at startup). All three are in ISSUES.md "Known limitations".
 
 ## Current Task
+DONE (sessions 56-62, closed 2026-10-16) — MULTIPLEXING + TAB BAR + SIDE-BY-SIDE VIEW, at the user's request
+("session 56/57 needs to be finished. Then it needs to be pushed"). Every step of the session-60 plan is
+carried out: `src/main.c` is wired to `layout_apply()` / `render_init(..., conf.fg)` /
+`render_draw(&rend, &font, &g_layout, terms)` so `bin/kai-term` links again; the whole suite runs (`make test`
+-> 501/0 + MODEL OK + CLI 86/0, `make asan` clean); the live key/pointer-injection run session 56 never got
+was done in session 61 and found TWO real defects (a bar/pane click that logged a switch it never made, and
+`BTN_RIGHT`/`BTN_MIDDLE` swapped), both fixed and re-verified live; the new checks are in
+(`layout_grid_size`, `layout_initial_size`, `mouse_sgr_button`, the three session-57 config keys in
+cli_test.sh); and README / docs/ARCHITECTURE.md / ISSUES.md / AGENT.md are synced. Session 62 found and fixed
+a third defect while checking the docs against the source (`tab_bar = always` started the window one row short
+of the configured `rows`). The commit + push is the last step and is recorded in the session-62 Progress entry.
+The session-56 and session-57 blocks below are the COMPLETED SPECIFICATION — kept because they record the
+interpretation each feature was built to, not because anything in them is still to do.
+
+WHAT IS OPEN NOW (nothing in progress — ask the user what to build next):
+* ISSUES.md Open #1 — the second-instance `atlas glTexImage2D failed: 0x505 (512x512)` + SIGSEGV, the only
+  crash left. Never reproduced here; the binary links again, so two live instances plus a headless harness
+  are now possible.
+* ISSUES.md Open #2 — `eglSwapBuffers failed: 0x3000` on launch plus one `swap failed (1 in a row)` warning;
+  the retry works and nothing looks wrong. Decide whether it is a real first-frame race or a log line to soften.
+* ISSUES.md Open #4 — the intermittent fullscreen freeze, deferred by the user (session 59).
+* The user has NOT yet looked at the tab bar / side-by-side view in their own window. Their verdict is what
+  closes that feature visually — the log lines prove the behaviour, not the appearance.
+DONE (session 59) — PROJECT RENAME `K-Term` -> `Kai-Term`, at the user's request ("We will need to
+rename K-Term to Kai-Term to avoid conflict with another project I found"). The other project is not
+identified; nothing about it is known here. Steps 1-6 below are all carried out; the verification limit is
+stated in the Progress entry (the binary does not link, for a pre-existing reason, so nothing that needs
+`bin/kai-term` could be run).
+What the rename covers (every name the project owns):
+* directory `K-Term/` -> `Kai-Term/`; header `include/k-term/k-term.h` -> `include/kai-term/kai-term.h`;
+  binary `bin/k-term` -> `bin/kai-term`; config file `~/.config/k-term/k-term.conf` ->
+  `~/.config/kai-term/kai-term.conf`.
+* strings and identifiers: `DEF_APP_ID`/`DEF_TITLE` `"K-Term"` -> `"Kai-Term"`, the log prefix
+  `k-term <level>:` -> `kai-term <level>:`, `k-term: <cli error>`, the `-v` line, `k-term exiting`,
+  `TERM_PROGRAM=k-term` -> `kai-term`, `k_term_loglevel` -> `kai_term_loglevel`, include guard
+  `K_TERM_H` -> `KAI_TERM_H`, the Makefile's `-Iinclude/k-term` and `BIN`, and the test expectations that
+  pin those literals (tests/test_vt.c app_id + mux_title checks, tests/cli_test.sh messages).
+Planned steps (each verified before the next):
+1. Baseline measured BEFORE touching anything (the tree does not fully build — see below).
+2. Text rename in `src/`, `include/`, `tests/`, `Makefile`, `.gitignore` (sed, then a diff review).
+3. File/dir moves (`git mv` for the header so git records it as a rename; plain `mv` for the project dir).
+4. Verify: every translation unit except `main.c` compiles with 0 warnings; `bin/test_vt` + `bin/dbg` run;
+   `main.c`'s error set is IDENTICAL to the pre-rename baseline (proof the rename introduced nothing).
+5. Docs: README.md + docs/ARCHITECTURE.md renamed throughout (current-state docs); ISSUES.md Open +
+   Known limitations renamed; AGENT.md current-state sections renamed. Dated journal entries and the
+   ISSUES.md "Fixed" root-cause entries keep the names they were written with (they quote commands that
+   were really run and log lines that were really printed) and each file gets one note saying the rename
+   happened on 2026-10-16 (session 59) — that is the honest form of "consistent".
+6. Report the two things OUTSIDE this project that still say `K-Term` and must follow the rename:
+   `~/.config/k-term/k-term.conf` (the user's real settings — copied to the new path, the old file left
+   in place) and `~/.config/niri/config.kdl` line 83 `match app-id="K-Term"` (a window rule; NOT edited
+   here — it is the user's compositor config, they decide).
+Expected outcome: `make` builds `bin/kai-term`, the window reports `app_id = Kai-Term`, the config is read
+from `~/.config/kai-term/kai-term.conf`, and no file in the project still uses the old spelling except in
+dated history. NOT part of this task: the GitHub repository name (`origin` stays
+`https://github.com/K-code-AI/K-Term` until the user renames it there, then `git remote set-url`).
+
+FOLLOW-UPS THE USER HAS TO DECIDE ON (outside this project; three of them are root-owned and `sudo` here
+asks for a password, so they were NOT touched):
+* `~/.config/niri/config.kdl` line 83 `match app-id="K-Term"` — a window rule (no focus ring, half-width
+  column). It stops matching once the app id becomes `Kai-Term`. Fix: change it to `match app-id="Kai-Term"`
+  (or add a second `match` line so both work). niri reloads with `niri action reload-config`.
+* `/usr/local/bin/k-term` — an INSTALLED copy of the old binary (root-owned, mtime 2026-10-15 22:08, md5
+  8069009ae927fcfd2046f3e2a64ed85a). There is no `install` target in the Makefile, so it was copied by hand.
+  Until it is replaced by `bin/kai-term`, the user is still running the OLD name with the OLD default config
+  path.
+* `/usr/local/bin/desktop-terminal` (root-owned) is `#!/bin/sh` + `exec k-term -c
+  ~/.config/k-term/desktop-terminal.conf`, and `~/.local/share/applications/desktop-terminal.desktop`
+  launches it. Both the command and the config path in that script need the new spelling once the binary is
+  installed as `kai-term`.
+* The GitHub repository itself: rename it on GitHub, then `git remote set-url origin
+  https://github.com/K-code-AI/Kai-Term` and `git fetch`.
+
+COMPLETED SPECIFICATION (written during sessions 56-58, before the session-59 rename; finished by sessions
+60-62). These blocks were written BEFORE the rename, so read their paths with that in mind: `include/k-term/k-term.h` is now
+`include/kai-term/kai-term.h`, `bin/k-term` is now `bin/kai-term`, and the header include in every source is
+`#include "kai-term.h"` (`-Iinclude/kai-term`).
+DEFERRED BY THE USER (session 59, 2026-10-16): the fullscreen freeze below is "intermittent and doesn't
+always reproduce" — the user asked to note it and look at it later. It is now ISSUES.md Open #4 (with the
+intermittency, the `-d`/`wchan` levers to use, and the note that the layout rewiring means the frame-pacing
+rules must be re-checked rather than assumed to have survived), and the session-45-47 "Fixed" entry carries a
+note that it must not be assumed to still hold. It is not the current task.
+FORMER BLOCKING BUG REPORT (session 58, from the user): "it freeze the display when going full screen" — a
+REGRESSION of the session-47 fullscreen freeze (ISSUES.md "Fixed": a configure that changes the size
+must be answered with a buffer of the new size, and no swap may run while a prepared read is
+outstanding). Reproduced/ diagnosed under "Progress" below; the fix must survive the layout rewiring.
+
+SPECIFICATION (session 57) — TAB BAR + SIDE-BY-SIDE VIEW (DONE: wired in session 60, verified in sessions
+61-62), the user's request: "when we have tabs to have a
+visual indication showing the different tabs with the ability to click on them to swap between them" and
+"it would be nice to be able to swap between Tab and Side by Side view".
+What is being built (interpretation recorded so a resumed session does not have to guess):
+* A TAB BAR drawn inside the window (one text row at the top, inside the Config.padding margin): one item
+  per session showing its number, a `*` when a hidden session has unread output, and its OSC title (or
+  `shell`); the visible session's item is highlighted. A left click on an item switches to that session,
+  a middle click closes it. Shown by default when there are >= 2 sessions (`tab_bar = off|auto|always`).
+* A LAYOUT MODE toggle: `tab` (one session fills the window, the bar names the rest) vs `side-by-side`
+  (up to `split_max` sessions drawn as equal-width panes in the same window, the active one bordered);
+  `key_toggle_layout` (default Ctrl+Shift+S) swaps them. A click in a non-active pane focuses that session.
+* All geometry is decided in ONE new pure module, `src/layout.c` (no Wayland, no EGL, no fd): it turns
+  window px + cell px + padding + mode + the tab list into the bar strip, the item rects, the labels and
+  the pane rects (each with the cols/rows that fit in it). main.c resizes each displayed session to its
+  pane and maps the pointer through the pane's origin; render.c draws exactly what layout says
+  (bar backgrounds, per-pane grid, labels, active-pane border) in one draw call.
+Planned steps (each verified before the next):
+1. Baseline measured first (below).
+2. `include/k-term/k-term.h` layout types + `src/layout.c` + Makefile + layout checks in tests/test_vt.c.
+3. `src/render.c`: `render_draw(Render *, Font *, const Layout *, Term *const *terms)` — bar + panes;
+   `Render.gx/gy` and `render_set_origin()` go away (the layout carries the per-pane origin).
+4. `src/config.c`: `tab_bar`, `split_max`, `key_toggle_layout`.
+5. `src/main.c`: layout_apply() (geometry + per-pane resize), the bar/pane click handling, the toggle
+   binding, hidden-pane vs hidden-tab attention, the initial window height with the bar.
+6. tests (layout + cli), `make`/`make test`/`make asan`, a live key-injection run (log lines are the
+   evidence, no screen recording — the user verifies anything visual themselves), then docs.
+Expected outcome: with 2+ sessions the user sees a clickable bar of tab names, clicking one swaps to it,
+and Ctrl+Shift+S flips the window between one-maximized-session and all-sessions-side-by-side.
+FINISHED SINCE (sessions 61-62): the items session 56 left open — `make asan` after the main.c wiring, the
+live end-to-end key-injection check of the tab bindings, and the README/ARCHITECTURE/ISSUES entries for
+multiplexing — are all done; see the session-61 and session-62 Progress entries.
+
+DONE ENOUGH TO BUILD ON (session 56) — MULTIPLICING / TABS, the user's request: "We are going to add multiplexing
+functionality to K-Term. The key-binding should be configurable in the config file."
+What is being built (interpretation recorded here so a newcomer can resume it): one window hosting
+several terminal SESSIONS (tabs), each with its own `Term` + PTY, one visible at a time, switched by
+keybindings that come from the config file. Pane splitting is NOT part of this task.
+Planned steps (each verified before the next):
+1. Baseline measured first: `make clean && make` 0 warnings, `make test` 364/0 + MODEL OK + CLI 77/0
+   (`/tmp/s56_base_build.log`, `/tmp/s56_base_test.log`).
+2. `src/mux.c` + the `Mux`/`Tab`/`KeyBind` types in k-term.h — the tab bookkeeping (open/close/goto/
+   next/prev, the `max_tabs` limit, the active index, the window-title text) and the key-binding spec
+   parser, both free of Wayland/EGL so they are unit-testable.
+3. Config keys for the bindings (`key_new_tab`, `key_close_tab`, `key_next_tab`, `key_prev_tab`,
+   `key_tab_prefix`, `max_tabs`) in `src/config.c`.
+4. `src/main.c`: the single `term`/`pty` globals become the ACTIVE TAB's; every input, render, resize,
+   clipboard and event-loop path addressed; per-tab PTY fds in epoll (fd -> tab lookup); SIGCHLD reaps
+   by pid and closes that tab; closing the last tab exits; teardown closes every tab.
+5. Tests: mux + keybind checks in `tests/test_vt.c` (link `src/mux.c` in the Makefile), then
+   `make`/`make test`/`make asan`, then a live key-injection run proving the bindings reach the
+   terminal (`.scratch/inject`, the log lines are the evidence — no screen recording).
+6. Docs: README (feature, settings rows, shortcuts), docs/ARCHITECTURE.md (module + data flow),
+   ISSUES.md (the no-tab-bar limitation), AGENT.md.
+Expected outcome: `Ctrl+Shift+T` opens a tab, `Ctrl+Shift+W` closes it, `Ctrl+Shift+Left/Right`
+switch, `Ctrl+Shift+<1-9>` jumps, all rebindable in the config file; every session keeps its own
+scrollback, selection and shell.
+
 DONE (session 55) — documentation accuracy pass + commit + push, at the user's request ("Cleanup +
 commit"). Everything from sessions 52-54 is now in the repo: commit `19c8bd3`, pushed to `origin/main`
 (`b451d87..19c8bd3`), tree clean and level with the remote.
@@ -94,13 +256,14 @@ window padding, and with it the `DEF_BG` clear-colour follow-up, which moved fro
 "Fixed" in session 55. The user also ruled that the blank-cell colour I found while measuring is NOT a
 defect ("working as intended") — do not re-open it.
 
-OPEN WORK (the only two real bugs left, both user-reported, both in ISSUES.md "Open"):
-* **#1:** launching `k-term` while ANOTHER k-term is still running prints `atlas glTexImage2D failed:
+OPEN WORK (the three real bugs in ISSUES.md "Open", all user-reported):
+* **#1:** launching `kai-term` while ANOTHER kai-term is still running prints `atlas glTexImage2D failed:
   0x505 (512x512)` and then `SIGSEGV`; with no leftover process it starts fine twice in a row. Not
   reproduced here yet.
 * **#2:** on launch, `eglSwapBuffers failed: 0x3000` + `swap failed (1 in a row), retrying on the next
   frame`; no visible effect, the retry works. Reproduce, explain, fix if it is a real defect rather than
   a benign first-frame race.
+* **#4:** the intermittent fullscreen freeze, deferred by the user (session 59).
 
 PREVIOUS TASK (session 51) — DONE: `-C` -> `-c`, retired-flag messaging deleted, one generic unknown-option
 message; committed and pushed as `b451d87`.
@@ -740,6 +903,661 @@ message; committed and pushed as `b451d87`.
   instruction: they verify anything visual themselves). Open #2 (`eglSwapBuffers failed: 0x3000` on
   launch) is the smaller one after that.
 
+- 2026-10-15 (session 56, MULTIPLICING started — plan recorded, baseline measured, no file changed yet).
+  REQUEST: "We are going to add multiplexing functionality to K-Term. The key-binding should be
+  configurable in the config file."
+  READ FIRST: AGENT.md, ISSUES.md, README.md, include/k-term/k-term.h, src/config.c, src/main.c,
+  src/pty.c, Makefile, tests/cli_test.sh + the head/tail of tests/test_vt.c.
+  INTERPRETATION (written so a resumed session does not have to guess): multiplexing = several terminal
+  sessions (tabs) in ONE K-Term window, each with its own `Term` + PTY + scrollback + selection, one
+  visible at a time, switched by config-file keybindings. Splitting the window into panes is NOT in this
+  task (it would need a renderer change); the session abstraction built here is what makes it possible
+  later.
+  WHY THE CURRENT CODE CANNOT JUST GROW A SECOND SESSION: `src/main.c` keeps exactly one `static Term
+  term` and one `static Pty pty`, and ~150 places read them (input handlers, selection, scrollback,
+  zoom, clipboard, the render call, the pty read branch, SIGCHLD). The plan is to make those names mean
+  "the ACTIVE tab" and to give every tab its own PTY fd in epoll, with an fd -> tab lookup and a SIGCHLD
+  path that reaps by pid and closes the tab that owned that child.
+  FACTS CHECKED IN src/vt.c that constrain the design: `term_parse()` sets `ps->t = t` on every call
+  (vt.c:1604), so a `Term` that is MOVED in memory repairs its own parser back-pointer on the next
+  parse — but nothing else may read `ps->t` before that, so a tab array that shifts on close must fix
+  `ps.t` explicitly. `term_init()` memsets the whole Term and `term_destroy()` frees both grids, so a
+  tab must be initialized exactly once and destroyed exactly once (the `GRID_VALID` sentinel is what
+  makes a double free detectable).
+  BASELINE (measured, not trusted): `make clean && make` exit 0, 0 warnings (`/tmp/s56_base_build.log`);
+  `make test` -> `364 checks, 0 failures` + `MODEL OK (0 problems)` + `CLI: 77 checks, 0 failures, 0
+  skipped` (`/tmp/s56_base_test.log`). `git status --short` clean, `main` == `origin/main` at `0437537`.
+  NEXT ACTION: write `src/mux.c` (tab bookkeeping + the key-binding spec parser) and the `Mux`/`Tab`/
+  `KeyBind` types in include/k-term/k-term.h, then the config keys, then main.c, then tests.
+
+  STEP 1 DONE — include/k-term/k-term.h + new src/mux.c (not built yet, so nothing is claimed to work):
+  * Header: `DEF_TITLE "K-Term"` (single-sourced like DEF_APP_ID, because mux_title() now builds the
+    title from it); a "configurable key bindings" section with the `KB_CTRL/KB_SHIFT/KB_ALT/KB_SUPER`
+    modifier bits, a `KB_KEY_*` enum carrying the standard X keysym numbers for the named keys
+    (arrows, Home/End/Prior/Next/Insert/Delete/BackSpace/Tab/Return/Escape/Space/F1-F12), the
+    `KeyBind {sym, mods, set}` type and the `keybind_parse()` / `keymods_parse()` prototypes; new
+    `Config` fields `max_tabs`, `key_new_tab`, `key_close_tab`, `key_next_tab`, `key_prev_tab`,
+    `tab_prefix_mods`; and a "multiplexing" section after the pty section (it must come after both
+    `Term` and `Pty` because `Tab` contains them) with `TAB_MAX` 64, `Tab {Term, Pty, attention}`,
+    `Mux {tab[], n, active, max}` and the mux_* prototypes.
+  * `src/mux.c` — the tab bookkeeping only, no Wayland/EGL/fd/fork, so tests/test_vt.c can link it:
+    `mux_init` (clamps max_tabs to 1..TAB_MAX), `mux_open` (term_init + `pty.mfd = -1`, makes the new
+    tab visible, -1 at the limit), `mux_close` (term_destroy, shifts the later tabs down to keep the
+    array DENSE, zeroes the vacated slot so a grid pointer cannot be freed twice, and RE-ARMS
+    `tab[i].term.ps.t` for every moved tab — vt.c's parser reads that self-pointer), `mux_goto`
+    (clamped), `mux_next`/`mux_prev` (wrap-around), `mux_cur`/`mux_count`/`mux_active`, `mux_touch`
+    (attention on a hidden tab) and `mux_title` (one tab -> `K-Term` exactly, i.e. no visible change
+    for a single-session user; several -> `K-Term [2/3]`, with `!N` when hidden tabs have unread
+    output — the title is the only place the tab state can be seen, there is no tab bar).
+  DECISIONS: the tab array is dense (index == the number the user counts); `mux_open` switches to the
+  new tab; a binding spec with NO modifier is refused by keybind_parse (an unmodified binding would
+  swallow plain typing); `key_xxx = none` unbinds an action.
+  NEXT ACTION: the config keys + `keybind_parse`/`keymods_parse` in src/config.c.
+
+  STEP 2 DONE — src/config.c + Makefile + tests/test_vt.c, VERIFIED: `keybind_parse()` /
+  `keymods_parse()` (split on '+', case-insensitive, modifier names ctrl/control/shift/alt/mod1/
+  super/mod4/win/gui, named keys BackSpace Tab Return/Enter Escape/Esc space Left Right Up Down Home
+  End Page_Up/PageUp/Prior Page_Down/PageDown/Next Insert Delete F1-F12, and any single printable
+  character as itself with letters folded to lowercase), `set_keybind()` (`none`/`off`/`no`/`0`/empty
+  unbinds; an unparseable spec keeps the current binding and warns), the six new config keys
+  (`max_tabs` clamped 1..TAB_MAX, `key_new_tab`, `key_close_tab`, `key_next_tab`, `key_prev_tab`,
+  `key_tab_prefix`) and the defaults (Ctrl+Shift+T / W / Right / Left, prefix Ctrl+Shift, 8 tabs).
+  Makefile: `src/mux.c` added to SRCS and to all four test rules (bin/test_vt, bin/dbg and both
+  sanitizer rules — the stale-binary pitfall says every source a test binary compiles must be a
+  prerequisite).
+  VERIFIED: `make` exit 0, 0 warnings (`/tmp/s56_b1.log`); `./bin/test_vt` -> `434 checks, 0 failures`
+  (364 -> 434, 70 new: 34 mux + 16 keybind/keymods + 20 config-file). NEGATIVE TEST for the mux
+  ps.t re-arm: the same tests built against a mux.c with that line deleted ->
+  `434 checks, 2 failures`, one of them exactly "mux: a moved tab's parser points at its new home".
+  (The sed also left the `for` without a body, so it swallowed the `n == 0` branch and produced a
+  second failure — the harness was crude, the ps.t result is still valid.)
+  NEXT ACTION: src/main.c — the single `term`/`pty` globals become the active tab's, per-tab PTY fds
+  in epoll, SIGCHLD reaps by pid, tab_open/tab_close/tab_switch, the keybindings in send_key, the
+  window title, teardown.
+
+  STEP 3 DONE — src/main.c wired to the mux, VERIFIED (build + full test suite). The rename was done
+  with sed first (`term.` -> `cur_term()->`, `&term` -> `cur_term()`, same for pty; `k-term` protected
+  by a placeholder so the #include and the message strings survived — a plain `\bterm\b` sed would
+  have rewritten them), then hand-edited. What changed: (continues below)
+  * `static Term term; static Pty pty;` -> `static Mux mux;` plus `cur_term()`/`cur_pty()`, which
+    resolve through `mux_cur()` on every call, so there is no second copy of "which tab is visible"
+    to keep in sync. They return NULL only after the last tab closes; `redraw()` and
+    `term_size_changed()` check for that, everything else stops with W.running.
+  * `term_size_changed()` resizes EVERY tab (they share the window) and `pty_setsize`s each one so
+    every shell gets SIGWINCH; the `grid resized` debug line gained `tab i/n`.
+  * `scrollback_nav(Term *, int)` and `snap_to_live(Term *)` are per session — scrolling one tab must
+    not move another's view. New `paint_blank_cells(Term *)` replaces the two duplicated colour loops
+    (startup, zoom) and is also what initializes a new tab.
+  * New section "multiplexing: the sessions of this window": `update_title()` (xdg_toplevel_set_title
+    from mux_title), `norm_sym()` + `bind_match()` (letters folded to lowercase, modifier set must
+    match EXACTLY), `tab_for_fd()` / `tab_for_child()` (epoll reports only an fd; SIGCHLD only a pid),
+    `tab_spawn()` (pty_spawn + epoll_ctl, shared by the first tab and every later one), `tab_open()`,
+    `tab_close()` (captures the Pty BEFORE mux_close shifts the array, drops the fd from epoll, closes
+    it, SIGHUPs the child, and sets W.running = 0 when the last tab goes) and `tab_switch()`.
+  * `send_key()` matches the five bindings FIRST (before the built-in Ctrl+Shift+C/V, because the tab
+    actions are the configurable ones — documented in the comment), computes the effective modifier
+    mask as the four KB_* bits, and returns 0 for all of them so a held key cannot repeat a tab
+    action. `key_tab_prefix` + a digit 1-9 jumps to that tab.
+  * Event loop: the pty branch is now `tab_for_fd(fd)` and works on that tab; output on a HIDDEN tab
+    does not redraw and does not snap its scroll — it calls `mux_touch()` and updates the title once
+    (mux_touch now returns 1 only when it newly set the flag). A pty that reaches EOF closes that tab
+    instead of exiting the app. SIGCHLD reaps with `waitpid(-1, …, WNOHANG)` in a loop, matches the
+    pid to a tab, zeroes `pty.child` (so tab_close does not kill a recycled pid) and closes the tab.
+  * main(): `mux_init(conf.max_tabs)` + `mux_open()` before the window, `g_cmd`/`g_wdir` remembered
+    for later tabs, the epoll fd created BEFORE the first `tab_spawn()` (it registers the descriptor),
+    and teardown loops over every session (close master, SIGHUP + WNOHANG reap, term_destroy).
+  * `-d` now also covers the diagnostics config_load() prints: `k_term_loglevel` is raised to DEBUG
+    before config_load when -d was given, then settled on the final level (the CLI still beats the
+    file). Found because the new CLI check for `config: key_close_tab unbound` saw nothing — the
+    message is L_INFO and the level used to be applied only after the file had been read.
+  * tests/cli_test.sh: the "-e COMMAND ends on its own" expectation follows the new wording
+    (`mux: the pty of tab 1/1 closed` / `mux: the shell of tab 1/1 exited`), and 4 new checks cover
+    the multiplexing config keys (no `unknown key`, `key_close_tab = none` logs the unbind, `mux:
+    session 1/1 started` is logged, exit 0).
+  VERIFIED: `make clean && make` exit 0, 0 warnings (`/tmp/s56_b2.log`, again `/tmp/s56_b3.log`);
+  `make test` -> `436 checks, 0 failures` + `MODEL OK (0 problems)` + `CLI: 81 checks, 0 failures,
+  0 skipped` (`/tmp/s56_t5.log`). Two test bugs of my own on the way: `scroll_apply` still called the
+  old one-argument `scrollback_nav` (compiler caught it), and a mux check assumed the wrong active tab.
+  NEXT ACTION: `make asan`; then the live end-to-end check with injected Ctrl+Shift+T / Right / Left /
+  W against `./bin/k-term -d` (the log lines are the evidence, no screen recording).
+
+- 2026-10-15 (session 57, TAB BAR + SIDE-BY-SIDE VIEW started — plan recorded, baseline measured, no file
+  changed yet). REQUEST: "We added Multiplexing to K-Term. I'd like it that when we have tabs to have a
+  visual indication showing the different tabs with the ability to click on them to swap between them.
+  Also it would be nice to be able to swap between Tab and Side by Side view."
+  READ FIRST: AGENT.md, ISSUES.md, include/k-term/k-term.h, src/mux.c, src/main.c (all of it),
+  src/render.c (all of it), src/config.c, src/vt.c's term_grid_geometry, Makefile, tests/test_vt.c's
+  mux/config blocks.
+  WHY THE BAR IS NOT JUST A MAIN.C JOB: render.c draws exactly one `Term` grid per frame, anchored at
+  `Render.gx/gy`, and main.c maps the pointer with the same single origin. A bar and side-by-side panes
+  need N rectangles with N origins, so the geometry becomes its own concern. DECISION: a new pure module
+  `src/layout.c` computes everything (bar strip, item rects + labels, pane rects + the cols/rows that fit
+  in each), main.c resizes each displayed session to its pane and hit-tests the pointer through it, and
+  render.c only draws what the Layout says. That keeps the whole feature unit-testable headlessly, which is
+  the only kind of test this environment can trust (the user verifies anything visual themselves).
+  BASELINE (measured, not trusted from the journal): `make clean && make` exit 0, 0 warnings
+  (`/tmp/s57_base_build.log`); `make test` -> `436 checks, 0 failures` + `MODEL OK (0 problems)` +
+  `CLI: 81 checks, 0 failures, 0 skipped` (`/tmp/s57_base_test.log`). `git status --short`: AGENT.md,
+  Makefile, include/k-term/k-term.h, src/config.c, src/main.c, tests/cli_test.sh, tests/test_vt.c modified
+  + `src/mux.c` untracked (session 56's multiplexing work, not committed yet); `main` == `origin/main`
+  at `0437537`.
+  NEXT ACTION: the layout types in k-term.h + src/layout.c, then its tests, then render.c, config.c,
+  main.c.
+
+  STEP 1 DONE — include/k-term/k-term.h (not built yet, so nothing is claimed to work): the layout
+  section (LAYOUT_TABS/LAYOUT_SPLIT, BAR_OFF/BAR_AUTO/BAR_ALWAYS, BAR_LABEL_MAX 40, PaneGeom
+  {x,y,w,h,cols,rows,tab}, BarItem {x,w,tab,active,attention,label}, Layout {mode,bar_on,bar_*,item[],
+  npane,pane[]}, TabInfo {tab,attention,title}, LayoutReq, layout_compute + the three hit-test
+  prototypes), the three new Config fields (tab_bar, split_max, key_toggle_layout), and the renderer API
+  change: `render_draw(Render *, Font *, const Layout *, Term *const *terms)` replaces
+  `render_draw(Render *, Term *, Font *)`, `Render.gx/gy` and `render_set_origin()` are GONE (the layout
+  carries a per-pane origin, so one global offset no longer exists). `terms` is indexed by TAB index, not
+  by pane index — chosen because PaneGeom.tab is the mux index, so the renderer cannot pair a pane with
+  the wrong session by an off-by-one in main.c.
+  NEXT ACTION: src/layout.c + the Makefile + layout checks in tests/test_vt.c.
+
+  STEP 2a DONE — new src/layout.c (written, not compiled yet): layout_compute() + the three hit tests.
+  Rules it implements, each to be pinned by a check: Config.padding is the margin around everything and
+  with the bar off + one pane the numbers equal what term_grid_geometry() used to return for the whole
+  window (so a single-session window cannot change shape); the bar is one cell row tall inside the top
+  margin with `gap` px below it; leftover px stay at the right/bottom of their pane; if the bar would
+  leave no room for one text row the BAR is dropped, not the grid; split mode shows at most split_max
+  panes and the shown window of tabs slides to contain the active one (clamped at both ends); labels are
+  "<n> <title>" with a leading * for unread output, `shell` when the session has no OSC title, cut to the
+  item's column count at a UTF-8 codepoint edge (clip_utf8 counts lead bytes only).
+  NEXT ACTION: the Makefile (src/layout.c in SRCS + all four test rules) and the layout checks.
+
+  STEP 2b DONE — Makefile (src/layout.c in SRCS and in all four test-binary rules, per the stale-binary
+  pitfall) + 38 layout checks in tests/test_vt.c (a `lreq()` builder and a `utf8_len()` helper above main).
+  VERIFIED: `make bin/test_vt` 0 warnings -> `474 checks, 0 failures` (436 -> 474). Two of my own test bugs
+  on the way, both caught immediately: a new `int cols, rows, xoff, yoff` shadowed the ones at line 523 of
+  the same one-big-main() (-Wshadow, renamed to gcols/grows/gxoff/gyoff), and `"a\xc3\xa9b"` is ONE greedy
+  hex escape (0xa9b, "hex escape sequence out of range") — C string concatenation `"a\xc3\xa9" "b"` is what
+  was meant. PITFALL: in this test file every new local must be checked against the outer ones (main is one
+  ~1500-line function) and any \x escape followed by a hex digit needs string splitting.
+  What the checks pin: one pane with the bar off == the old term_grid_geometry numbers; BAR_AUTO shows the
+  bar from the second session; the bar costs exactly one text row and keeps the bottom margin; equal-width
+  items with the remainder at the right; hit tests (bar item / pane / gap / margin / bar-is-not-a-pane);
+  labels ("1 shell", "1 *shell", "2 vim", UTF-8 cut at a codepoint edge, never wider than the item);
+  split panes equal width, non-overlapping, each grid fitting its rect; the pane window sliding with the
+  active tab (start/end clamped); tab mode giving a pane only to the visible session; the bar dropped
+  rather than the text row in a 30x30 window; no sessions -> no pane and no bar; padding 0 -> the old
+  edge-to-edge layout; negative pad/gap treated as 0.
+  NEXT ACTION: src/render.c — draw the bar + N panes in one draw call.
+
+  STEP 3a DONE (header follow-ups, still nothing compiled): `Layout.active_tab` added (the session the
+  keyboard talks to — the renderer needs it to highlight the right item and to border the right pane;
+  the bar items' `active` flag is not enough because with tab_bar = off there are no items), and
+  `render_init(..., uint32_t bg, uint32_t fg)` + `Render.fg`: the bar's text/separator colours are mixed
+  from the CONFIGURED palette, never from a Term's pen, because a Term's pen is the application's current
+  SGR pen and an application must not be able to repaint the chrome that names its tab.
+  NEXT ACTION: src/render.c — draw the bar + N panes in one draw call.
+
+  STEP 3b DONE — src/render.c rewritten around the layout (builds clean: `make build/render.o` 0 warnings;
+  the full `make` still fails because main.c has not been wired yet, which is expected at this point).
+  What changed: ensure_vdata/ensure_edata now take a QUAD COUNT (the caller counts: 3 per grid cell of
+  every pane + BAR_LABEL_MAX+2 per bar item + 4 for the border) instead of rows*cols; render_init takes
+  the configured fg; render_draw(Render*, Font*, const Layout*, Term *const *terms) draws the whole frame:
+  a PaneDraw context per pane (pane_prepare: the grid clamped to what the pane can hold, its origin, its
+  selection span), then the same three back-to-front passes over EVERY pane, then the bar (item
+  backgrounds + a 1 px separator per item + the label glyphs decoded from UTF-8 by a local next_cp()), then
+  the 2 px focus border around the active pane (split mode only) emitted last. Chrome colours are mixed
+  from Render.bg/Render.fg by mix_c() (active item = SEL_BG, inactive = bg+10% fg with 45% dimmed text,
+  separator = fg-65% toward bg, an inactive pane's cursor = CURSOR_COL 55% toward bg) so an application
+  cannot repaint the chrome. The selection band edges stay ABSOLUTE buffer px, which is safe across panes
+  because panes never overlap in x (checked in tests) — the shader compares the fragment's absolute x.
+  The whole-cell remainder is now per pane (pad_gl = vh - pane.y - nrows*ch), which is what keeps
+  main.c's `row = (ptr_y - pane.y)/cell_h` exact inside every pane.
+  JOURNAL PITFALL HIT AGAIN (my own, third time for this class): the anchor line "NEXT ACTION: src/render.c
+  — draw the bar + N panes in one draw call." existed TWICE (end of the STEP 2b and of the STEP 3a block),
+  so this entry was first inserted after STEP 2b, out of order; moved below STEP 3a. Rule from the Key
+  Decisions section applies to these step blocks too: anchor on text that is unique in the file.
+  NEXT ACTION: src/config.c (tab_bar / split_max / key_toggle_layout), then src/main.c.
+
+- 2026-10-16 (session 59, RENAME K-Term -> Kai-Term — COMPLETE: code, build files, file layout and docs;
+  the four things outside this project that still say `K-Term` are listed under Current Task for the user).
+  Steps 1-4 are the code and build files, step 5 the docs, step 6 the user's own config; each is recorded
+  below in order. WHY: the user asked for it ("rename K-Term to Kai-Term to avoid conflict with another
+  project I found"); the other project is not identified.
+  BASELINE MEASURED FIRST (the tree does NOT fully build — session 57 stopped with src/main.c not yet wired
+  to the new render_draw/render_init signatures): `make -k` -> 5 errors, ALL in src/main.c
+  (`render_set_origin` implicit at :213, `render_draw` argument 2/3 + too few arguments at :329, `render_init`
+  too few arguments at :1455), 0 warnings anywhere else, 7 of 8 objects build (main.o is the only failure);
+  `bin/test_vt` -> `486 checks, 0 failures`, `bin/dbg` -> `MODEL OK (0 problems)`
+  (`/tmp/s59_base_build.log`, `/tmp/s59_base_errs.txt`). That baseline is what the rename is measured
+  against — a rename on a tree that does not link cannot be verified by `make` alone.
+  DONE (step 2, text): sed over src/*.c, include/k-term/k-term.h, tests/dbg.c, tests/test_vt.c,
+  tests/cli_test.sh, Makefile, .gitignore — `K_TERM_H`->`KAI_TERM_H`, `k_term_loglevel`->`kai_term_loglevel`,
+  `K-Term`->`Kai-Term`, `k-term`->`kai-term`. The user-visible strings that changed, all verified by grep
+  afterwards: `DEF_APP_ID`/`DEF_TITLE` = "Kai-Term", the log prefix `kai-term <level>:` (src/vt.c:26),
+  `kai-term: unknown option` / `kai-term: <flag> needs an argument` (src/main.c), the `-v` line
+  `kai-term 0.1.0 (prototype)`, `kai-term exiting`, `TERM_PROGRAM=kai-term` (src/pty.c:72), the config path
+  `$XDG_CONFIG_HOME/kai-term/kai-term.conf` / `~/.config/kai-term/kai-term.conf` (src/config.c:388,390),
+  the `-c` usage line, and the Makefile's `-Iinclude/kai-term`, `HDRS` and `BIN := bin/kai-term`.
+  LEFT ALONE ON PURPOSE: `/tmp/kterm_test_config*.conf` and the `io.github.kaida.kterm` app_id in
+  tests/test_vt.c — arbitrary test fixtures, not the product name.
+  DONE (step 3, files): `git mv include/k-term/k-term.h include/kai-term/kai-term.h` (git records it as
+  `RM`, so the history follows the file), `rmdir include/k-term`, then `mv K-Term Kai-Term` for the project
+  directory itself; `git status -sb` from the new path still shows `## main...origin/main` and the same log.
+  VERIFIED (step 4): `make clean && make -k` -> the SAME 5 errors, byte-for-byte identical to the baseline
+  (`diff /tmp/s59_base_errs.txt /tmp/s59_after_errs.txt` -> no output), still 0 warnings, still 7 of 8
+  objects; `bin/test_vt` -> `486 checks, 0 failures` (unchanged) and `bin/dbg` -> `MODEL OK`
+  (`/tmp/s59_after_build.log`, `/tmp/s59_after_errs.txt`). The renamed strings are in the compiled objects:
+  `strings build/config.o` shows `%s/.config/kai-term/kai-term.conf` + `Kai-Term`, `build/vt.o` shows
+  `kai-term %s: `, `build/pty.o` shows `kai-term`, `build/mux.o` shows `Kai-Term`.
+  NEGATIVE TEST (proves the renamed literals are pinned, not just pasted): `DEF_APP_ID`/`DEF_TITLE` put back
+  to "K-Term" -> `486 checks, 6 failures`, and the 6 are exactly the app_id-default, app_id-fallback and
+  mux_title checks ("config: app_id defaults to Kai-Term", "mux: the title says which tab of how many", …);
+  restored -> `486 checks, 0 failures`.
+  NOT VERIFIABLE YET, and this is the honest limit of this step: `make test-cli` and any live check of the
+  binary (app_id in the compositor, the config path actually being read, the `k-term:`-style CLI messages)
+  need `bin/kai-term` to LINK, and it does not link for the pre-existing session-57 reason above. The
+  expectations in tests/cli_test.sh were renamed (`^kai-term `, `kai-term: unknown option '<flag>'`,
+  `kai-term: <flag> needs an argument`, `kai-term exiting`, default `./bin/kai-term`) but are UNTESTED until
+  main.c is wired. Do not mark the CLI surface verified until someone runs `make test-cli`.
+  DONE (step 5, docs): README.md and docs/ARCHITECTURE.md renamed throughout (0 old-name hits left in
+  either — they are current-state user documentation). ISSUES.md: title + "Open" + "Known limitations"
+  renamed, and the two verbatim user-reported output blocks under "Open" put BACK to the old spelling with a
+  parenthetical, because they are what the user actually saw (`k-term error: atlas glTexImage2D failed:
+  0x505 …`); its "Fixed" section is left as written. AGENT.md: title, Project Overview, the OPEN WORK block,
+  Environment, Next Steps, Project Files and Key Decisions renamed; the dated Progress and History entries,
+  the quoted user sentences ("I confirm the padding to be working properly in K-Term", …), the GitHub URL
+  (the repo is not renamed yet) and the session-42 note that the pcmanfm-qt window's title was literally
+  "K-Term" are all kept as written. Each of the three docs now carries one note saying the rename happened on
+  2026-10-16 and that older entries keep the old spelling — that is what makes the set consistent without
+  rewriting history.
+  HAZARD CLOSED: the paused session-56/57 task blocks still name `include/k-term/k-term.h` as the file to
+  edit, so a resumed session could create the old path. A translation note was added under "PAUSED"
+  (`include/k-term/k-term.h` -> `include/kai-term/kai-term.h`, `bin/k-term` -> `bin/kai-term`,
+  `#include "kai-term.h"`).
+  FIXED WHILE IN THERE (stale, not name-related, all verified numbers): the Project Files tree said
+  `src/ config.c vt.c pty.c font.c render.c main.c` (mux.c and layout.c existed but were unlisted),
+  `tests/test_vt.c 364 checks` (it is 486), and `tests/cli_test.sh 77 checks` (81 since session 56). The tree
+  now lists both new modules, says 486, and marks cli_test.sh as NOT RUNNABLE since session 57 with its last
+  verified run named. `src/mux.c` and `src/layout.c` gained one-line descriptions.
+  DONE (step 6, outside the project): `~/.config/kai-term/` created and the user's two config files COPIED
+  there (`kai-term.conf`, `desktop-terminal.conf`); `~/.config/k-term/` left untouched so nothing is lost and
+  the old installed binary keeps working. The three root-owned items (niri rule, /usr/local/bin/k-term,
+  /usr/local/bin/desktop-terminal + its .desktop entry) are listed under Current Task for the user — `sudo`
+  asks for a password here, so they were not touched.
+  FINAL RE-VERIFICATION after every doc edit: `make clean && make -k` -> the SAME 5 pre-existing main.c
+  errors, identical to the baseline, 0 warnings (`/tmp/s59_final_build.log`, `/tmp/s59_final_errs.txt`);
+  `bin/test_vt` -> `486 checks, 0 failures`; `bin/dbg` -> `MODEL OK (0 problems)`; `make asan` -> exit 0,
+  `486 checks, 0 failures` + `MODEL OK`, no LeakSanitizer/UBSan report (`/tmp/s59_final_asan.log`) — that one
+  matters because the sanitizer rules compile the sources directly and depend on `$(HDRS)`, whose path the
+  rename changed. `find include -type f` -> only `include/kai-term/kai-term.h`; `grep -rn
+  "include/k-term|k-term\.h"` over the project -> hits ONLY in dated journal entries and in this rename
+  entry. `make test-cli` fails at `build/main.o` (the pre-existing link failure), not on a path.
+  STILL NOT VERIFIED (unchanged from before the rename, and it is the tree's real problem, not the rename's):
+  `bin/kai-term` does not link, so `make test`, `make run`, the CLI suite and every live check (app id in the
+  compositor, the config path actually being read, `TERM_PROGRAM`, the CLI messages) are blocked on session
+  57's unfinished main.c wiring.
+  NEXT ACTION: session 57's step 5 — wire src/main.c to `layout_apply()` + the new
+  `render_init`/`render_draw`, which is what unblocks `make test`/`make run`/`make test-cli` again. The
+  fullscreen freeze (ISSUES.md Open #4) is deferred by the user and is NOT the next task; it also cannot be
+  investigated until that wiring lands, because the binary does not link. Then ask the user about the four
+  follow-ups listed under Current Task.
+
+- 2026-10-16 (session 59, follow-up in the same session — the fullscreen freeze reclassified, then the git
+  side of the rename).
+  NEW INFORMATION FROM THE USER, recorded verbatim where it matters: the fullscreen freeze is "intermittent
+  and doesn't always reproduce", so "let's put a note on that and see if we can fix it later". The user also
+  took back items 1-3 of the rename follow-ups (the niri `match app-id="K-Term"` rule, the installed
+  `/usr/local/bin/k-term`, and `/usr/local/bin/desktop-terminal` + its .desktop entry) — they are handling
+  those themselves, so do not edit them.
+  DONE: ISSUES.md gained Open #4 carrying the intermittency, the fact that it cannot be reproduced at all
+  while `bin/kai-term` does not link, the two mechanisms from session 46 that would each produce a
+  timing-dependent freeze, the warning that the session-57/58 layout rewiring moves the draw/commit path so
+  the frame-pacing rules must be re-checked rather than assumed to have survived, and the concrete levers
+  (`-d`: `toplevel state: fullscreen 1` must be followed by `configure answered: buffer <output size>
+  attached`; a `swap failed (N in a row)` streak; `/proc/<pid>/wchan` = `ep_poll` vs `futex_do_wait`; and
+  running the fullscreen action repeatedly and RECORDING THE RATE, because one clean run proves nothing for
+  an intermittent bug). The session-45-47 entry in "Fixed" now says it is a record of the root cause and the
+  rules, not a claim that fullscreen is freeze-free, and points at Open #4. AGENT.md's Current Task no longer
+  calls it BLOCKING.
+  NOT DONE, deliberately: no investigation. Nothing was run — the binary does not link, and the user deferred
+  it.
+
+- 2026-10-16 (session 60, STEP 1 DONE — `src/main.c` wired to the layout; `bin/kai-term` LINKS again, so
+  `make test`, `make test-cli`, `make run` and every live check are unblocked).
+  WHAT CHANGED (src/main.c unless said otherwise):
+  * `term_size_changed()` is GONE, replaced by `layout_apply()`: it fills a `LayoutReq` from the window px,
+    the cell px, `Config.padding`, `PANE_GAP`, the mode, the session list (index, attention flag,
+    `Term.title`) and `Config.split_max`/`tab_bar`, calls `layout_compute()`, then resizes EVERY session to
+    `layout_grid_size()` — the size a pane of this layout has, drawn or not — and finally sets `W.gx/W.gy` to
+    the origin of the pane the VISIBLE session is drawn in, which is what `sel_cell()`/`mouse_cell()` map the
+    pointer through. Called from `apply_pending_resize()`, `zoom_apply()`, `tab_open()`, `tab_close()`,
+    `tab_switch()`, `redraw()` (the bar labels and unread marks are part of the picture) and after
+    `wayland_setup()`.
+  * New file-scope state: `static Layout g_layout;` and `static int layout_mode` (LAYOUT_TABS/LAYOUT_SPLIT),
+    plus `#define PANE_GAP 8` — the px between panes and between the bar and the grid. NOT a config key on
+    purpose: `padding` already sets the margin around everything, and a gap of 0 would let one pane's focus
+    border draw over its neighbour.
+  * `redraw()` builds `Term *terms[TAB_MAX]` indexed by TAB index (like `PaneGeom.tab`) and calls
+    `render_draw(&rend, &font, &g_layout, terms)`; `wayland_setup()` passes `conf.fg` to `render_init()`, so
+    the chrome colours come from the configured palette.
+  * Pointer: a press in the bar switches sessions (left button) or closes one (middle button) and never
+    reaches the application or starts a selection — checked BEFORE the mouse-reporting branch, so an
+    application that grabbed the mouse cannot eat the bar. A press in a pane that is not the visible session
+    focuses that session first. `cur_term()` is re-checked after a middle-click close, because closing the
+    last session makes it NULL inside a listener.
+  * `send_key()` matches `key_toggle_layout` (default Ctrl+Shift+S) with the other tab bindings; it calls the
+    new `layout_toggle()`, which flips the mode and re-applies the layout.
+  * PTY branch: output on a session that is DRAWN but not visible (side-by-side) marks the frame dirty and
+    sets NO unread flag; only a session with no pane at all gets `mux_touch()` + a title update, and the
+    redraw is skipped when there is no bar (the picture really did not change).
+  * Startup: with `tab_bar = always` the initial window height gains `cell_h + PANE_GAP`, otherwise the grid
+    would come up one row short of the configured `rows`.
+  * New log line, one per LAYOUT-SHAPE change (not per frame):
+    `layout: tab view, 1 pane, tab bar off, grid 80x24 per session` — the client-side evidence for every
+    bar/pane report, and what `tests/cli_test.sh` will grep for. The `grid resized` line gained
+    `%s view, %d pane%s` and its `unused` numbers are now per pane.
+  * src/layout.c + the header: new `layout_grid_size(const Layout *, int *cols, int *rows)` — the grid size
+    every session of a layout gets, which is what makes a tab switch cost nothing (no resize, no SIGWINCH
+    storm, no reflow on every switch). 0/0 when the layout has no pane.
+  * include/kai-term/kai-term.h: the three comments that claimed "there is no tab bar" (`DEF_TITLE`,
+    `Tab.attention`, `mux_title`) now say what is true since session 57's renderer work — the bar carries the
+    same state inside the window, the title is what a compositor/taskbar shows.
+  VERIFIED: `make clean && make` -> exit 0, 0 warnings, 0 errors, `bin/kai-term` produced
+  (`/tmp/s60_build1.log`). The five baseline errors are gone; nothing has been RUN yet, so no test result, no
+  live behaviour and no feature is claimed to work at this point.
+  PITFALL HIT (mine, third time for this class — the Key Decisions section already warns about it): the
+  anchor `## Environment (verified 2026-10-12` occurs TWICE, once inside the session-55 entry that describes
+  that very accident. `grep -c "^## Environment"` said 1 and lied; the python `count()` said 2 and aborted
+  before writing anything. Anchor on a line-start-anchored string (`\n## ...`) and count with python, not
+  with a `^`-anchored grep.
+  NEXT ACTION: `make test` and `make asan`, then the new checks (layout_grid_size in tests/test_vt.c, the
+  three session-57 config keys in tests/cli_test.sh), then the live key-injection run.
+
+- 2026-10-16 (session 60, STEP 2 DONE — the full suite runs again, and the new checks pin the wiring's
+  invariants). Exact commands and results:
+  * `make clean && make` -> exit 0, 0 warnings, 0 errors, `bin/kai-term` built (`/tmp/s60_build1.log`).
+  * `make test` -> `486 checks, 0 failures` + `MODEL OK (0 problems)` + `CLI: 81 checks, 0 failures,
+    0 skipped` (`/tmp/s60_test1.log`). `WAYLAND_DISPLAY=wayland-1` is set here, so 0 skipped means the
+    CLI suite really opened windows ~25 times with the newly linked binary and every run exited by itself.
+  * `make asan` -> `486 checks, 0 failures` + `MODEL OK`, no LeakSanitizer/UBSan report
+    (`/tmp/s60_asan1.log`). This is the `make asan` re-run session 56 never got after its main.c wiring.
+  * tests/test_vt.c: 4 new checks for `layout_grid_size()` — it names the panes' grid, EVERY pane of one
+    layout has that same grid (so a tab switch never resizes anything), a session outside the visible pane
+    window still gets the size its pane will have, and no pane -> 0x0 so the caller must not resize.
+    `./bin/test_vt` -> `490 checks, 0 failures` (486 -> 490).
+  * tests/cli_test.sh: 5 new checks over the real binary — `tab_bar`/`split_max`/`key_toggle_layout` are
+    known keys, `key_toggle_layout = none` logs `config: key_toggle_layout unbound`, and the new
+    `layout:` line reads `layout: tab view, 1 pane, tab bar on, grid …` with `tab_bar = always` and
+    `… tab bar off …` with the default `auto`. `sh tests/cli_test.sh ./bin/kai-term` ->
+    `CLI: 86 checks, 0 failures, 0 skipped`. The no-display skip list gained the two new groups.
+  NOT VERIFIED YET: anything that needs a human to look (does the bar LOOK right, are the labels legible,
+  is the focus border where it should be) — that is the user's, as always. And the tab bindings have still
+  never been exercised end to end (session 56's live check), which is the next entry.
+  NEXT ACTION: the live key-injection run — `bin/kai-term -d` with injected Ctrl+Shift+T / Right / Left /
+  S / W, reading the `mux:` and `layout:` log lines as the evidence, plus an ASan build of the binary
+  itself so the new main.c paths are covered by the sanitizer too.
+
+- 2026-10-16 (session 61, RESUMED session 60 — objective and plan recorded before any change).
+  OBJECTIVE: finish what session 60 left, in its recorded order — (a) the live end-to-end run of the tab
+  bindings and the layout toggle, which session 56 never got and session 60 named as its own next action;
+  (b) an ASan build of the `kai-term` BINARY itself so the new main.c mux/layout paths are covered by the
+  sanitizer, not just the unit tests; (c) the docs pass (README, docs/ARCHITECTURE.md, ISSUES.md, AGENT.md)
+  for multiplexing + the tab bar + side-by-side; (d) commit and push to `origin/main`, which the user asked
+  for in session 60 ("Then it needs to be pushed").
+  PLANNED STEPS: 1 re-measure the baseline; 2 the live key-injection run against `./bin/kai-term -d`
+  (`.scratch/inject`), evidence = the `mux:` / `layout:` / `grid resized` log lines, no screen recording
+  (the user verifies anything visual themselves); 3 an ASan build of the binary + the same injected run with
+  `ASAN_OPTIONS=detect_leaks=0`; 4 fix whatever the runs expose, with checks added for it; 5 docs; 6 commit
+  + push after `git fetch`.
+  EXPECTED OUTCOME: the log shows a session opened by Ctrl+Shift+T, switches by Ctrl+Shift+Right/Left, a
+  `layout:` line flipping between `tab view` and `split view` on Ctrl+Shift+S, and a session closed by
+  Ctrl+Shift+W; the ASan run reports no Kai-Term leak or overflow; the docs describe only what was built and
+  run.
+  BASELINE RE-MEASURED FIRST (nothing trusted from the journal): `make clean && make` -> exit 0, 0 warnings,
+  `bin/kai-term` built (`/tmp/s61_base_build.log`); `make test` -> `490 checks, 0 failures` + `MODEL OK
+  (0 problems)` + `CLI: 86 checks, 0 failures, 0 skipped` (`/tmp/s61_base_test.log`). `git status -sb`:
+  `main` == `origin/main` at `0437537`, 15 modified files, `RM include/k-term/k-term.h ->
+  include/kai-term/kai-term.h`, `src/mux.c` + `src/layout.c` untracked — i.e. sessions 56-60 are still
+  uncommitted, as session 60 left them.
+
+  STEP 2 DONE — the live key-injection run (session 56's missing check) RAN, and it found TWO REAL DEFECTS.
+  Harness `.scratch/s61/tabs.sh` (log `/tmp/s61_live.log`), `./bin/kai-term -d -e 'sleep 400 # MARK'`, keys
+  injected with `.scratch/inject`, window focused by "the id that appeared after launch":
+  VERIFIED WORKING (the log lines are the evidence):
+  * `Ctrl+Shift+T` twice -> `mux: tab 2/2 opened (pid …, pty fd 36, grid 154x60)`, `mux: tab 3/3 opened`;
+    the bar appears with the second session (`layout: tab view, 1 pane, tab bar on, grid 154x60`) and every
+    session is resized to the SAME grid (154x60) — the layout_grid_size invariant holds live.
+  * `Ctrl+Shift+Right` / `Left` -> `mux: tab 3/3 visible`, `mux: tab 2/3 visible` (mux_next/mux_prev really
+    do move the active tab).
+  * `Ctrl+Shift+S` -> `layout: side-by-side view, 3 panes, tab bar on, grid 50x60 per session` and three
+    `grid resized … side-by-side view, 3 panes` lines; `Ctrl+Shift+S` again -> `tab view, 1 pane`.
+  * `Ctrl+Shift+W` x3 -> `mux: tab 3 closed, 2 left`, `tab 2 closed, 1 left`, `tab 1 closed, 0 left`,
+    `mux: the last session is gone, exiting`, `kai-term exiting`, exit 0. Closing the last session exits the
+    window, and the bar disappears with the second-to-last close (`tab bar off`).
+  * A LEFT CLICK on a bar item reaches the bar code: `bar: click selects session 2/3` (pointer aimed with the
+    new absolute injector, see Environment).
+  DEFECT A — a bar/pane click does NOT switch the session, although the log says it does.
+  `tab_switch()` (src/main.c:576) logs `mux: tab N/M visible`, re-applies the layout and marks the frame
+  dirty, but it never calls `mux_goto()` — only the KEYBOARD paths change the active tab, because
+  `mux_next`/`mux_prev`/`mux_goto` are called by `send_key` (main.c:738,739,754) and their return value is
+  merely passed to tab_switch as an argument. The pointer paths (main.c:1079 bar click, main.c:1092 click in
+  a non-active pane) pass the index but nothing consumes it. Measured (`.scratch/s61/panemap.sh`,
+  `/tmp/s61_map.log`): split view, 2 panes (pane0 x=8, pane1 x=630, cell 8 px); clicks at surface x = 20,100,
+  250,400,430,500 in the LEFT pane all report `cell=(0,29)` — the value the clamp produces when the origin
+  still belongs to pane 1 — while x=850 -> `cell=(27,29)` and x=880 -> `cell=(31,29)` are exact for pane 1.
+  Six clicks in pane 0 logged six `mux: tab 1/2 visible` lines, i.e. the same "switch" over and over.
+  FIX PLANNED: make `tab_switch()` itself call `mux_goto()` and log the ACTIVE INDEX THAT mux REPORTS, so
+  the line cannot lie; the keyboard calls then become idempotent no-ops.
+  DEFECT B — `map_button()` (src/main.c:918) swaps BTN_RIGHT and BTN_MIDDLE. The kernel header says
+  BTN_LEFT 0x110, BTN_RIGHT 0x111, BTN_MIDDLE 0x112 (`/usr/include/linux/input-event-codes.h:357-359`), but
+  the switch labels 0x111 as middle (SGR 1) and 0x112 as right (SGR 2). Consequences: an injected middle
+  click on a bar item produced NO `bar: middle click closes session` line at all (measured,
+  `/tmp/s61_bar.log`), and — worse — a RIGHT click on the bar would hit the `btn == 1` branch and CLOSE a
+  session. It also swaps middle/right in SGR mouse reporting for vim/htop/etc.
+  FIX PLANNED: correct the mapping and make it testable — move it to vt.c as a pure
+  `mouse_sgr_button(uint32_t evdev)` (vt.c already owns the mouse-reporting state) and pin it with checks in
+  tests/test_vt.c, because main.c is in no test binary.
+  HARNESS FACTS LEARNED (recorded in Environment): the relative pointer injector cannot be aimed (its
+  `--home` drives into niri's top-left overview corner — the user's warning) and `pkill -f MARK` matched the
+  harness's own command line and killed the harness (exit -9). The absolute injector
+  `.scratch/s61_apinject` (no homing, parks at the output centre, refuses the corner) aims exactly: probe
+  click at output (700,600) -> `ptr=(49,584)` -> window origin (651,16), and every later click landed where
+  aimed.
+  NEXT ACTION: fix A and B, add the checks, rebuild, re-run `make test`/`make asan` and both live harnesses
+  (the bar middle-click close and the pane-click focus must now be visible in the log), then the ASan build
+  of the binary, then docs, then commit + push.
+
+  STEP 3 DONE — DEFECTS A AND B FIXED, and both re-verified LIVE (not just by the unit tests).
+  Fix B (the button mapping):
+  * `include/kai-term/kai-term.h` — new `EVDEV_BTN_LEFT/RIGHT/MIDDLE` enum (0x110/0x111/0x112) next to the
+    MOUSE_* bits, with the comment saying the kernel order is NOT the protocol order, plus the
+    `mouse_sgr_button()` prototype.
+  * `src/vt.c` — new "mouse button mapping" section before "terminal core": `mouse_sgr_button()` returns
+    0 left / 1 middle / 2 right / 3 anything else. It lives in vt.c because that is where the mouse-reporting
+    state is and because main.c is in no test binary (the same reason cli_test.sh exists).
+  * `src/main.c` — `map_button()` DELETED; `ptr_button()` calls `mouse_sgr_button(button)`; a comment marks
+    where the mapping went.
+  * `tests/test_vt.c` — 6 new checks after the mouse-mode block, including the raw literals
+    (`EVDEV_BTN_RIGHT == 0x111 && EVDEV_BTN_MIDDLE == 0x112`) so the enum cannot be re-ordered to match a
+    wrong switch again.
+  Fix A (the switch that did not switch): `tab_switch()` in src/main.c now calls `mux_goto(&mux, idx)` itself
+  and logs `act + 1` from what mux reports rather than the requested index, so the line cannot claim a switch
+  that did not happen. The keyboard paths (`tab_switch(mux_next(&mux))` etc.) are unchanged and become
+  idempotent (mux_goto to the index they already moved to). Comment records why the bug was invisible on the
+  keyboard path.
+  VERIFIED (exact commands): `make` -> exit 0, 0 warnings (`/tmp/s61_b2.log`); `make test` -> `496 checks,
+  0 failures` + `MODEL OK (0 problems)` + `CLI: 86 checks, 0 failures, 0 skipped` (`/tmp/s61_t2.log`);
+  490 -> 496 (the 6 button checks).
+  NEGATIVE TEST: the same tests against a vt.c with the two cases swapped back -> `496 checks, 3 failures`,
+  exactly `BTN_MIDDLE -> SGR 1`, `BTN_RIGHT -> SGR 2`, `raw 0x111 is right, raw 0x112 is middle`
+  (`/tmp/s61_neg/`).
+  RE-RUN OF THE LIVE HARNESS `.scratch/s61/panemap.sh` (`/tmp/s61_map.log`) — the mapping is now exact in
+  BOTH panes of a side-by-side window (pane0 x=8, pane1 x=630, cell 8 px): surface x=20 -> `cell=(1,29)`,
+  100 -> `(11,29)`, 250 -> `(30,29)`, 400 -> `(49,29)`, 430 -> `(52,29)`, 500 -> `(61,29)` (all pane 0),
+  850 -> `(27,29)`, 880 -> `(31,29)` (pane 1). Before the fix every pane-0 click reported column 0. The mux
+  log also became honest: one `mux: tab 1/2 visible` for the first pane-0 click and one
+  `mux: tab 2/2 visible` for the first pane-1 click, instead of the same line six times.
+  RE-RUN OF `.scratch/s61/barclick.sh` (`/tmp/s61_bar.log`) — left click on bar item 2 ->
+  `bar: click selects session 2/3` + `mux: tab 2/3 visible`; MIDDLE click on bar item 3 ->
+  `bar: middle click closes session 3/3` + `mux: tab 3 closed, 2 left (pid …)` (before the fix: no line at
+  all); `Ctrl+Shift+S` -> `layout: side-by-side view, 2 panes, tab bar on, grid 76x60 per session`; a click
+  in the left pane -> `mux: tab 1/2 visible` AND `sel press cell=(30,29) … cols=76`, i.e. the click both
+  focused that session and mapped through its pane.
+  NOTE ON COVERAGE: these two fixes are proven by the live runs, not by bin/test_vt — main.c is in no test
+  binary and no test can send a pointer button. That is stated here so nobody later "assumes" the unit
+  tests cover the pointer paths.
+  NEXT ACTION: an ASan build of the kai-term BINARY itself plus the same injected session run under it
+  (`ASAN_OPTIONS=detect_leaks=0`), then `make asan`, then the docs pass (README multiplexing/tab bar/
+  side-by-side + the nine settings + the shortcuts; ARCHITECTURE mux.c/layout.c + the new log lines;
+  ISSUES.md the two fixed defects + the layout/tab-bar limitations + the now-stale "window title is always
+  Kai-Term" wording, since mux_title does push a title now), then commit + push after `git fetch`.
+
+  STEP 4 DONE — the sanitizer runs, then the docs pass (in progress, file by file).
+  ASan/UBSan build of the BINARY itself (`.scratch/s61/kterm_asan`, built with the Makefile's own PKG list —
+  the first attempt forgot `wayland-egl egl gl` and died on undefined `egl*` references), driven by
+  `.scratch/s61/asan_tabs.sh` (`/tmp/s61_asan_live.log`, `ASAN_OPTIONS=detect_leaks=1`, run ended by closing
+  every session so LeakSanitizer actually ran): 3 sessions opened, digit jump `Ctrl+Shift+1` ->
+  `mux: tab 1/3 visible`, output typed into three different sessions, split view + `Ctrl+Shift+Right` sliding
+  the pane window, then 3 closes -> `mux: the last session is gone, exiting` + `kai-term exiting`.
+  NO AddressSanitizer memory error, NO UBSan "runtime error", 0 `kai-term error|warn` log lines, and the only
+  leaks are libdbus-1 and one `<unknown module>` frame — `SUMMARY: AddressSanitizer: 1250 byte(s) leaked in 5
+  allocation(s)`, no frame in Kai-Term source (consistent with ISSUES.md Open #3). Closing back to one session
+  also restored the startup shape exactly: `layout: tab view, 1 pane, tab bar off, grid 154x61 per session`.
+  `make asan` -> exit 0, `496 checks, 0 failures` + `MODEL OK (0 problems)`, no sanitizer report
+  (`/tmp/s61_asan_tests.log`).
+  DOCS (1/3) README.md — 3 new feature bullets (several sessions in one window, the tab bar, side-by-side
+  view); 9 new settings rows (`max_tabs`, `tab_bar`, `split_max`, `key_new_tab`, `key_close_tab`,
+  `key_next_tab`, `key_prev_tab`, `key_tab_prefix`, `key_toggle_layout`) with the defaults read from
+  `config_default()` in src/config.c, so the table now matches all 27 keys; 5 new shortcut rows; and a new
+  "Sessions and layouts" section (what the bar shows, click/middle-click, the view toggle, the equal-grid
+  rule, closing the last session, and the binding syntax). Only behaviour that has been built and RUN is
+  described.
+  NEXT: docs/ARCHITECTURE.md (mux.c/layout.c in the module map, the frame path with the bar + panes, the new
+  `-d` log lines, the button mapping), then ISSUES.md (the two fixed defects, the tab-bar/layout limitations,
+  and the stale "the window title is always Kai-Term" limitation — `update_title()` does push `mux_title()`
+  now), then commit + push.
+
+- 2026-10-16 (session 62, RESUMED session 61 — objective and plan recorded before any change).
+  OBJECTIVE: finish what session 61 left, in its recorded order — the docs pass (README was done;
+  docs/ARCHITECTURE.md and ISSUES.md were not), then commit and push, which the user asked for in session 60
+  ("session 56/57 needs to be finished. Then it needs to be pushed"). No source file is touched unless a doc
+  pass finds a documented claim that contradicts the code.
+  PLANNED STEPS: 1 re-measure the baseline; 2 docs/ARCHITECTURE.md (mux.c + layout.c in the module map, the
+  data flow through layout_apply/layout_compute, the per-tab pty fds in the event loop, the bar + pane draw
+  path, the evdev -> SGR button mapping, the new `-d` lines, the corrected check counts); 3 ISSUES.md (the
+  two session-61 defects into "Fixed" with their root causes, the tab-bar/layout known limitations, and the
+  stale "the window title is always Kai-Term" limitation — `update_title()` does push `mux_title()` now);
+  4 AGENT.md Current Status / Next Steps / Project Files sync; 5 `make`/`make test`/`make asan` after the doc
+  edits; 6 `git fetch` + commit + push.
+  EXPECTED OUTCOME: all four docs describe only what has been built and RUN, the check counts agree
+  everywhere, and `origin/main` contains the sessions 56-61 work.
+  BASELINE RE-MEASURED FIRST (nothing trusted from the journal): `make clean && make` -> exit 0, 0 warnings,
+  `bin/kai-term` built (`/tmp/s62_base_build.log`); `make test` -> `496 checks, 0 failures` + `MODEL OK
+  (0 problems)` + `CLI: 86 checks, 0 failures, 0 skipped` (`/tmp/s62_base_test.log`); `make asan` -> `496
+  checks, 0 failures` + `MODEL OK (0 problems)`, no LeakSanitizer/UBSan report (`/tmp/s62_base_asan.log`).
+  `git status -sb`: `main` == `origin/main` at `0437537`, 15 modified files, `RM include/k-term/k-term.h ->
+  include/kai-term/kai-term.h`, `src/mux.c` + `src/layout.c` untracked — sessions 56-61 are still
+  uncommitted, as session 61 left them.
+  README.md (session 61's part of the pass) CHECKED AGAINST THE SOURCE, not trusted: its settings table has
+  exactly the 27 keys `src/config.c` parses (`grep -c 'strcmp(key' src/config.c` -> 27), and its flags table
+  matches `usage()`.
+  NEXT ACTION: docs/ARCHITECTURE.md.
+
+  STEP 2 DONE — docs/ARCHITECTURE.md updated (data flow through Mux + layout_compute; `src/mux.c` and
+  `src/layout.c` added to the module table; render.c/config.c/vt.c/main.c rows corrected; test counts 364 ->
+  496 and 77 -> 86; the event loop now says one pty fd PER SESSION with the `tab_for_fd()` / `tab_for_child()`
+  lookups and the `waitpid(-1, …, WNOHANG)` reap; a new "Multiplexing and window layout" section for the
+  dense-Tab-array rules, the attention flag, the `layout_grid_size()` rule, the pointer-check order, the
+  chrome-colours-from-the-palette rule and the evdev -> SGR button mapping; the "Window geometry" section
+  rewritten for per-pane `term_grid_geometry()` calls (the `term_size_changed()` / `render_set_origin()` /
+  `Render.gx,gy` wording is gone — `grep` confirms no stale reference); the `-d` line list gained the
+  `layout:` line, the `mux:` lifecycle lines, the `bar:` click lines and the new `grid resized` fields).
+  DEFECT C FOUND WHILE CHECKING THE DOC AGAINST THE CODE (src/main.c:1773): the startup window height for
+  `tab_bar = always` is `init_h += font.cell_w + PANE_GAP` — the bar is one cell ROW tall (`out->bar_h = ch`
+  in src/layout.c), so it must be `cell_h`. With a non-square cell (8x17 here) the window is asked for 9 px
+  too little, so the grid comes up one row SHORT of the configured `rows` — exactly what the comment above
+  that line says the addition prevents. Not cosmetic: it is the one case where the configured `rows` is
+  silently not what the user gets.
+  PLANNED FIX (so it cannot come back): the arithmetic does not belong in main.c, which is in no test
+  binary. Move it to the pure geometry module as `layout_initial_size(cols, rows, cell_w, cell_h, pad, gap,
+  bar, &win_w, &win_h)` in src/layout.c (+ the prototype in kai-term.h), call it from main.c, and pin it in
+  tests/test_vt.c with a ROUND TRIP: feed the size it asks for back into `layout_compute()` and require the
+  grid to come back as exactly the requested cols x rows, for `BAR_ALWAYS` and `BAR_AUTO`, with a deliberately
+  non-square cell. That check fails against the `cell_w` version (29 rows instead of 30 at cell 8x17), which
+  is the negative test.
+  NEXT ACTION: the fix + the check, then `make test`.
+
+  DEFECT C FIXED + VERIFIED.
+  * `include/kai-term/kai-term.h` — `layout_initial_size(cols, rows, cell_w, cell_h, pad, gap, bar,
+    &win_w, &win_h)` prototype, with the comment saying why the arithmetic is not in main.c.
+  * `src/layout.c` — implemented next to `layout_grid_size()`: `win_w = cols*cell_w + 2*pad`,
+    `win_h = rows*cell_h + 2*pad`, plus `cell_h + gap` when `bar == BAR_ALWAYS` (BAR_AUTO shows no bar for
+    the single starting session, so it adds nothing). Inputs clamped like the rest of the module.
+  * `src/main.c` — the three hand-written lines replaced by one `layout_initial_size()` call; the comment
+    now points at the module instead of restating the arithmetic.
+  * `tests/test_vt.c` — 5 new checks: the exact startup size for `BAR_ALWAYS` and for `BAR_AUTO`, a
+    ROUND TRIP through `layout_compute()` + `layout_grid_size()` requiring the configured 80x30 to come back
+    for both, and the padding-0 / square-cell case.
+  VERIFIED (exact commands): `make` -> exit 0, 0 warnings (`/tmp/s62_b1.log`); `make test` -> `501 checks,
+  0 failures` + `MODEL OK (0 problems)` + `CLI: 86 checks, 0 failures, 0 skipped` (`/tmp/s62_t1.log`);
+  496 -> 501 (the 5 new checks).
+  NEGATIVE TEST: the same tests against a src/layout.c with `*win_h += ch + g` changed back to `cw + g`
+  (built into /tmp/s62_neg/) -> `501 checks, 2 failures`, and the two are exactly
+  "layout: the startup window is the grid + the margin + one bar ROW and its gap" and
+  "layout: a tab_bar = always startup really gets the configured cols x rows back". The `BAR_AUTO` checks
+  still pass there, as they should — that path adds no bar row.
+  NOT VERIFIED: what the user sees with `tab_bar = always` in a real window — niri tiles the window to its
+  own size, so the requested startup height is not observable from the log here. The arithmetic and its
+  round trip are verified; the visual result is the user's, as always.
+  NEXT ACTION: ISSUES.md.
+
+  STEP 3 DONE — ISSUES.md updated.
+  * "Fixed" gained three entries at the top (newest-first, as the rest of the section is): the bar/pane click
+    that logged a switch it never made (defect A, session 61 — root cause `tab_switch()` never called
+    `mux_goto()`, with the live evidence and the coverage note that main.c is in no test binary), the
+    `BTN_RIGHT`/`BTN_MIDDLE` swap (defect B, session 61 — kernel order is not the protocol order, the mapping
+    moved to `mouse_sgr_button()` in vt.c, 6 checks + the negative test), and the `tab_bar = always`
+    one-row-short startup (defect C, this session, with its round-trip checks and negative test).
+  * "Known limitations": the stale "The window title is always Kai-Term" entry REPLACED — `update_title()`
+    does push a title now (`Kai-Term`, or `Kai-Term [active/total]` plus `!N`); what is not in it is the
+    application's OSC title, which is the tab bar label instead. Four new limitations: the bar costs one text
+    row and is dropped before the grid is, labels are cut to the item width with no ellipsis, only
+    `split_max` sessions are drawn in split view (the rest show as `*` / `!N`), and every session of a window
+    shares one grid size so a layout change re-wraps sessions that are not on screen.
+  * Stale status corrected: Open #4 said the fullscreen freeze "CANNOT" be investigated because
+    `bin/kai-term` does not link — it has linked since session 60, so that sentence is rewritten (still not
+    investigated: the user deferred it), and its "How to investigate once the binary links again" heading
+    fixed. Open #3 notes that the hand-built ASan binary run of session 61 found no Kai-Term frame.
+  Verified by grep after the edit: no "does not link" / "window title is always" claim remains anywhere in
+  README.md, ISSUES.md or docs/ARCHITECTURE.md.
+  NEXT ACTION: AGENT.md Current Status / Next Steps / Project Files, then the final build/test/asan run.
+
+  STEP 4 DONE — AGENT.md synced (this file): Current Status re-dated to session 62 with the new numbers
+  (501 checks / CLI 86) and a new bullet saying what IS and what is NOT proven about multiplexing, the tab bar
+  and side-by-side view; Current Task rewritten from "IN PROGRESS (session 60)" to DONE with the three open
+  ISSUES items and the one thing to ask the user (their eyes on the bar); the session-56/57 blocks relabelled
+  as the COMPLETED SPECIFICATION; the stale "cannot be reproduced while bin/kai-term does not link" wording
+  removed from the session-59/58 blocks; Next Steps now lists three open bugs, drops the
+  "title never pushed to the compositor" housekeeping item (it is done) and replaces it with the OSC-title
+  question, and adds the session-61 harnesses to the scratch list; Project Files corrected (test_vt.c 486 ->
+  501 with the new coverage, cli_test.sh 81 -> 86 and its "NOT RUNNABLE" note deleted, vt.c/layout.c
+  descriptions extended); History gained the session-59 rename era and the sessions 60-62 era; Key Decisions
+  gained four entries — the log line that prints what it was GIVEN can lie, the evdev button order, geometry
+  belongs in src/layout.c because main.c is in no test binary, and a Term's pen must never colour the chrome.
+  Re-checked the claims this file makes: `grep -rnE "TEMPORARY|PROBE|EXPERIMENT|NEGATIVE" src/ include/
+  tests/` -> nothing; README's settings table is the 27 keys `src/config.c` parses.
+  STEP 5 DONE — FINAL VERIFICATION from a clean tree, exact commands and results:
+  * `make clean && make` -> exit 0, 0 warnings, 0 errors, `bin/kai-term` built (`/tmp/s62_final_build.log`).
+  * `make test` -> `501 checks, 0 failures` + `MODEL OK (0 problems)` + `CLI: 86 checks, 0 failures,
+    0 skipped` (`/tmp/s62_final_test.log`). `WAYLAND_DISPLAY=wayland-1` is set, so 0 skipped means the CLI
+    suite really opened ~25 windows with this binary and each exited by itself.
+  * `make asan` -> exit 0, `501 checks, 0 failures` + `MODEL OK (0 problems)`, no LeakSanitizer/UBSan report
+    (`/tmp/s62_final_asan.log`).
+  * live `timeout -k 2 15 ./bin/kai-term -d -c /tmp/s62_bar.conf -e 'echo smoke-ok; sleep 1'` with
+    `tab_bar = always`, `rows = 30`, `cols = 80` -> exit 0, ZERO error/warn lines, logging
+    `layout: tab view, 1 pane, tab bar on, grid 154x60 per session` (`/tmp/s62_live_always.log`); the same
+    run with the default `auto` -> `layout: tab view, 1 pane, tab bar off, grid 154x61 per session`
+    (`/tmp/s62_live_auto.log`), i.e. the bar really costs exactly one row and only when it is shown. niri
+    tiled the window to 1253x1002, so the requested startup height is still not observable here — that part
+    stays verified by the unit round trip only.
+  NEXT ACTION: `git fetch`, check ahead/behind, commit everything and push to `origin/main`.
+
 ## Environment (verified 2026-10-12; re-confirmed live 2026-10-14 session 38; compositor state re-checked
 2026-10-15 sessions 47, 48, 49 and 55)
 - Gentoo Linux, kernel 6.18.54, gcc 15.3.0, pkg-config 3.0.7.
@@ -772,34 +1590,46 @@ message; committed and pushed as `b451d87`.
   `/dev/uinput` is writable; a virtual keyboard shows up as `/dev/input/eventNN`, udev classifies it
   (`ID_INPUT_KEYBOARD=1`) and **niri/libinput opens it** (check `ls -l /proc/$(pgrep -x niri)/fd`).
   `.scratch/inject.c` (binary `.scratch/inject`) types a US-layout string and presses chords
-  (`@super+shift+m`, `@ctrl+c`, `@ret`); verified end to end — k-term running `-e 'cat > FILE'` received
+  (`@super+shift+m`, `@ctrl+c`, `@ret`); verified end to end — kai-term running `-e 'cat > FILE'` received
   exactly `hello^Mworld^M`. Session 44's "zero bytes, injection does not work" conclusion was WRONG: the
   injector's key table was the bug (evdev letter codes are NOT alphabetical — `KEY_A + (c-'a')` typed
   `kg##z` for `hello`). Ground truth for "did the key arrive" = the bytes the PTY got, not the screen
   (the screen is exactly what may be frozen).
   Pointer events can be injected the same way (`UI_SET_RELBIT`/wheel) — `.scratch/pinject.c` (binary
-  `.scratch/pinject`, built 2026-10-15) does `--home`, `--to X Y`, `--click X Y`, `--drag X1 Y1 X2 Y2`.
-  CAVEAT measured in session 49: RELATIVE motion goes through libinput's pointer ACCELERATION, so an
-  intended 120 px move can land ~480 px away, and a small intended move can land outside the window
-  entirely (zero `sel press` lines). Do not try to aim a selection drag by screen coordinates; fill the
-  whole viewport with text and read K-Term's own `sel press/drag cell=` log line to learn where it landed,
-  or drive the keyboard path instead.
+  `.scratch/pinject`, built 2026-10-15) does `--home`, `--to X Y`, `--click X Y`, `--mclick X Y`,
+  `--drag X1 Y1 X2 Y2`.
+  **THE TOP-LEFT CORNER IS A TRAP — the user's warning (session 61): when the pointer reaches the
+  leftmost top corner, niri shows the whole desktop (overview), which moves every window and destroys any
+  coordinate model the harness has.** So NEVER home/park the pointer at (0,0) or near it. `.scratch/pinject.c`
+  `--home` sends `rel(-4000,-4000)`, i.e. it drives straight into that corner — do not use `--home` any more
+  (session 61 measured it: after a `--home` the very next click landed 47 px off the intended point and the
+  following clicks produced no `sel press` line at all, i.e. they went to the overview, not to the window).
+  Use the ABSOLUTE injector instead: `.scratch/s61_apinject.c` (binary `.scratch/s61_apinject`) declares
+  `ABS_X`/`ABS_Y` over the output size, parks at the output CENTRE (960,540) when the device is created, and
+  refuses any target inside 40 px of the corner. libinput treats such a device as an absolute pointer, so
+  there is no acceleration and the coordinate is used as-is — that is what makes a click aimable.
+  CAVEAT measured in session 49 (and re-confirmed session 61): RELATIVE motion goes through libinput's
+  pointer ACCELERATION, so an intended 120 px move can land ~480 px away, and a small intended move can land
+  outside the window entirely (zero `sel press` lines). Do not aim a selection drag or a bar click by
+  relative motion; use `s61_apinject`, and verify where a click really landed from Kai-Term's own
+  `sel press/drag cell=(c,r) … ptr=(x,y)` log line — the window's absolute position is then
+  `click_target - ptr`, measured, never guessed (niri IPC does not report window positions).
 - **Clipboard testing needs a foreign client.** `wl-copy` / `wl-paste` are installed (`/usr/bin/`);
-  `wl-paste --list-types` shows exactly what the compositor advertises for the current owner. A K-Term-to-
-  K-Term paste test proves nothing about clipboard sharing — that is how a "private clipboard" complaint
+  `wl-paste --list-types` shows exactly what the compositor advertises for the current owner. A Kai-Term-to-
+  Kai-Term paste test proves nothing about clipboard sharing — that is how a "private clipboard" complaint
   could survive every test ever run here. Working recipe (session 49): `wl-copy 'TEXT' </dev/null` (it
-  otherwise keeps running and holds the pipe), launch k-term with `-e 'stty raw -echo; cat > FILE'`, focus
+  otherwise keeps running and holds the pipe), launch kai-term with `-e 'stty raw -echo; cat > FILE'`, focus
   the new window, inject `@ctrl+shift+v`, and read FILE — the bytes the PTY got are the ground truth.
 - **The compositor is cooperative again (session 47, re-confirmed by session 48) — live GUI measurement
   works again.** The session-46
   warning below is OBSOLETE: `niri msg focused-window` reports a focused window, `niri msg action
-  set-window-width/-height --id …` really resizes (a k-term window followed a 5-step sweep,
+  set-window-width/-height --id …` really resizes (a kai-term window followed a 5-step sweep,
   `/tmp/s47_stress2.log`), and `wf-recorder` captures the test window (session 48: a 4 fps frame diff of a
-  live k-term shows the picture changing every frame, `.scratch/s48_frames/`). Re-verify cooperativeness
+  live kai-term shows the picture changing every frame, `.scratch/s48_frames/`). Re-verify cooperativeness
   before trusting any live number (it was broken for a while), but do not assume it is still broken.
   Session-46 observation kept for context: when the compositor does NOT render a surface, that surface
   gets its map frame and nothing after it (no frame callbacks, no buffer releases) and ANY EGL client
-  blocks in its second `eglSwapBuffers` — that is an environment artifact, not a K-Term bug.
+  blocks in its second `eglSwapBuffers` — that is an environment artifact, not a Kai-Term bug.
 - **How to measure the draw path here (session 47, all proven working):**
   * `cat /proc/<pid>/wchan` — `ep_poll` = the event loop is alive; `futex_do_wait` = blocked inside the
     EGL driver (a swap that will never return). This is what separated "frozen display" from "dead loop".
@@ -808,12 +1638,12 @@ message; committed and pushed as `b451d87`.
     an interactive region), then
     `ffmpeg -i out.mp4 -vf fps=4 f%03d.png` and count bright pixels / diff frames with numpy: a live
     terminal shows monotonically growing text pixels, a frozen one shows zero change.
-  * An ASan build of the k-term BINARY itself (not just the tests): `cc -O1 -g
+  * An ASan build of the kai-term BINARY itself (not just the tests): `cc -O1 -g
     -fsanitize=address,undefined -fno-omit-frame-pointer $(CFLAGS) src/*.c
     build/generated/xdg-shell-protocol.c $(LDLIBS)`; run with `ASAN_OPTIONS=detect_leaks=0` to skip the
     third-party leak noise (ISSUES.md Open #1). That is how the `row[rcap]` overrun was found.
   * Identify a test window as "the window id that appeared after launch" and a test process by a unique
-    marker inside its `-e` command (`pgrep -f MARKER`) — `pgrep -x k-term` also matches leftovers from
+    marker inside its `-e` command (`pgrep -f MARKER`) — `pgrep -x kai-term` also matches leftovers from
     the previous trial and made an earlier A/B read the WRONG process.
 - **niri IPC facts:** `niri msg --json windows` has no absolute window position (`layout.window_size`,
   `tile_pos_in_workspace_view`, `pos_in_scrolling_layout` only), windows can report `workspace: null`,
@@ -938,77 +1768,118 @@ message; committed and pushed as `b451d87`.
   and three docs still quoted 323 checks — all corrected, and the sessions 52-55 work committed.
   USER INSTRUCTION from session 55, still in force: they verify anything visual themselves, so do not run
   screen-recording/pixel-diff harnesses to check how the window looks; use the headless tests and ask them.
+- **2026-10-16, session 59** — the project RENAME `K-Term` -> `Kai-Term` at the user's request (a name
+  conflict with another of their projects): directory, `include/kai-term/kai-term.h`, `bin/kai-term`,
+  `~/.config/kai-term/kai-term.conf`, `DEF_APP_ID`/`DEF_TITLE`, the `kai-term <level>:` log prefix,
+  `TERM_PROGRAM`, the Makefile and the tests that pin those literals. Measured against a pre-rename baseline
+  (the tree did not fully build — session 57 had left main.c unwired) so the rename could be shown to
+  introduce nothing; the user's own config was copied to the new path and the four items OUTSIDE the project
+  (niri window rule, `/usr/local/bin/k-term`, `/usr/local/bin/desktop-terminal` + its .desktop entry, the
+  GitHub repo name) were listed for the user, who took the first three. The fullscreen freeze came back
+  intermittently (ISSUES.md Open #4) and the user deferred it.
+- **2026-10-16, sessions 60-62** — MULTIPLEXING (session 56) and the TAB BAR + SIDE-BY-SIDE VIEW (session 57)
+  finished. Session 60 wired src/main.c to `layout_apply()` + the new `render_init`/`render_draw`, which is
+  what made `bin/kai-term` link again and unblocked `make test`/`make test-cli`/`make run` and every live
+  check. Session 61 ran the live key/pointer-injection verification session 56 never got and found two real
+  defects — a bar/pane click that logged a switch it never made (`tab_switch()` never called `mux_goto()`) and
+  `BTN_RIGHT`/`BTN_MIDDLE` swapped — both fixed, unit-pinned where possible and re-verified live, plus an ASan
+  build of the binary itself over a full multi-session run (clean). Session 62 finished the docs pass and,
+  while checking docs/ARCHITECTURE.md against the source, found and fixed a third defect: `tab_bar = always`
+  asked the compositor for `cell_w` instead of `cell_h` of extra height, so the grid came up one row short of
+  the configured `rows`; the arithmetic moved into `layout_initial_size()` in src/layout.c so a check can pin
+  it. Tests 436 -> 486 -> 496 -> 501; `make test` 501/0 + MODEL OK + CLI 86/0, `make asan` clean. The tab bar
+  and side-by-side view are NOT yet confirmed by the user by eye.
 
 ## Next Steps
-1. **Two real bugs are open, both user-reported, both in ISSUES.md "Open"** — start with #1, the only
+1. **Three real bugs are open, all user-reported, all in ISSUES.md "Open"** — start with #1, the only
    crash left:
-   * **#1** launching `k-term` while another k-term is still running prints `atlas glTexImage2D failed:
+   * **#1** launching `kai-term` while another kai-term is still running prints `atlas glTexImage2D failed:
      0x505 (512x512)` (GL_INVALID_VALUE on the mono atlas upload in `render_draw`) and then SIGSEGV.
      Never reproduced here yet. Work from the source and a headless harness, not from the screen.
    * **#2** `eglSwapBuffers failed: 0x3000` (EGL_BAD_ALLOC) on launch plus one `swap failed (1 in a row)`
      warning; the retry works and nothing looks wrong. Decide whether it is a real first-frame race worth
      fixing or just a log line to soften.
-   Everything else the user has confirmed working in their own window (padding, zoom, fullscreen,
+   * **#4** the intermittent fullscreen freeze (ISSUES.md Open #4), deferred by the user in session 59 — the
+     levers and the rate-recording method are written there; the binary links, so it is investigable.
+   Everything else the user has confirmed working in their own window (padding, zoom, fullscreen refresh,
    black-window fix, heavy-output segfault, clipboard both ways, transparency, key repeat, selection).
-2. Housekeeping options (none of them a bug): make the ASan build of the `k-term` binary a real Makefile
-   target (only the tests have one; the hand-built one in `.scratch/kterm_asan` found the `row[rcap]`
-   overrun, so covering the Wayland/EGL path would pay off — it would also cover the heap-grown
-   `paste_buf`); idle-frame optimization (stop the frame cycle when nothing is dirty); the color atlas is
-   re-uploaded whole with `glTexImage2D` whenever a new emoji is shaped — `glTexSubImage2D` per new shelf
-   would be cheaper; a reflow allocates a fresh row buffer per produced line (fine at terminal sizes, but
-   a huge-width window with a huge scrollback churns the allocator); the window title is parsed into
-   `Term.title` but never pushed to the compositor (ISSUES.md "Known limitations" — wiring it up is a
-   one-liner in `xdg_toplevel_set_title`, but it changes visible behaviour, so ask first).
+   **Not yet confirmed by eye: the tab bar, the side-by-side view and the session shortcuts** — they are
+   verified by log lines and 501 checks here, but the user has not looked at them. Ask.
+2. Housekeeping options (none of them a bug): make the ASan build of the `kai-term` binary a real Makefile
+   target (only the tests have one; the hand-built one in `.scratch/s61/kterm_asan` is what proves the
+   mux/layout paths are sanitizer-clean, and it found the `row[rcap]` overrun earlier, so covering the
+   Wayland/EGL path would pay off — it would also cover the heap-grown `paste_buf`); idle-frame optimization
+   (stop the frame cycle when nothing is dirty — note `redraw()` now calls `layout_apply()` every frame, so
+   that path is hotter than it used to be); the color atlas is re-uploaded whole with `glTexImage2D` whenever
+   a new emoji is shaped — `glTexSubImage2D` per new shelf would be cheaper; a reflow allocates a fresh row
+   buffer per produced line (fine at terminal sizes, but a huge-width window with a huge scrollback churns
+   the allocator); the window title is `mux_title()`'s own text and an application's OSC title only reaches
+   the tab bar label (ISSUES.md "Known limitations") — showing the ACTIVE session's OSC title in the window
+   title is a one-line change in `update_title()`, but it changes visible behaviour and makes the taskbar
+   name follow whatever the shell prints, so ask first.
 3. Clipboard hardening that niri does NOT require (do not do it unasked — it is untested against a
    compositor that needs it): call `wl_data_offer_accept()` before `wl_data_offer_receive()`, and offer /
    prefer `UTF8_STRING` + `text/plain;charset=utf-8` next to `text/plain`. Current behaviour is verified
    working on niri in both directions.
 4. Scratch cleanup: the throwaway probes live OUTSIDE the project tree in `/home/kaida/Project/.scratch/`
    (~125 MB, 160+ entries) — `egl_seq_probe.*`, `egl_probe.*`, `egl_resize_probe.*`, `inject.*`, `keyinj.*`,
-   `pinject.*` (pointer injector, session 49), `mk_repeat_probe.sh` + `repeat_probe.c`, `reflow_probe.c`,
+   `pinject.*` (pointer injector, session 49), `s61_apinject.*` (the ABSOLUTE pointer injector — the only
+   aimable one, session 61), `s61/` (`tabs.sh`, `barclick.sh`, `panemap.sh`, `asan_tabs.sh`, `kterm_asan`),
+   `mk_repeat_probe.sh` + `repeat_probe.c`, `reflow_probe.c`,
    `reflow_live*.sh`, `bisect/`, `paste_probe.c`, `iso*.c`, `kterm_asan`, `dbg_oldvt`, `s45_old/` (the last
    user-confirmed-good tree), `s47_before/`, `fs2/`, `fs3/`, `fs_frames/`, `s46_frames/`, `s48_frames/` +
    `s48_win.mp4`, the `s49_*.sh` clipboard harnesses, the `AGENT.md.before_prune` /
    `AGENT.md.before_restructure` / `AGENT.md.session48_preprune` journal
    copies, and the `*.log`/`*.sh` evidence the journal cites. Journal entries reference them as evidence;
    delete them once the user has confirmed the behaviour they cover (everything they covered is now
-   confirmed, so they can go — keep `s45_old/` and `s47_before/` if another draw-path regression is ever
+   confirmed EXCEPT the tab bar / side-by-side view, so keep `s61/` and `s61_apinject*` until the user has
+   looked at that feature — keep `s45_old/` and `s47_before/` if another draw-path regression is ever
    suspected, they are the A/B trees).
 5. Emoji paths that exist but have NEVER run here (verify before trusting them): the SCALABLE color
    font branch (`FT_IS_SCALABLE` -> `FT_Set_Pixel_Sizes` + `hb_ft_font_changed` on zoom) — this box only
    has the bitmap-only Noto CBDT font; and a cluster that HarfBuzz renders as more than one glyph is
    deliberately rejected (`ng == 1` check) and falls back to mono, which is the right behaviour but is
    untested against a font that does it.
-6. Git: the tree is committed and pushed (session 50). Nothing is pending; keep committing verified
-   work and keep `bin/`/`build/` out of it.
+6. Git: the tree is committed and pushed (the sessions 56-62 work went in during session 62; see its
+   Progress entry for the commit and the push result). `origin` is still
+   `https://github.com/K-code-AI/K-Term` — the GitHub-side rename is the user's call, then
+   `git remote set-url origin https://github.com/K-code-AI/Kai-Term`. Keep committing verified work and keep
+   `bin/`/`build/` out of it; `git fetch` before pushing, the user commits on GitHub too.
 
 ## Project Files
 ```
-K-Term/
+Kai-Term/
 ├── .gitignore                 # bin/, build/, *.o, *.obj, *.d, *.so, *.a, editor leftovers
 ├── LICENSE                    # MIT License, "Copyright (c) 2026 Kaida"
 ├── AGENT.md                   # this journal
 ├── ISSUES.md                  # open bugs + known limitations + fixed history (root causes)
 ├── README.md                  # features, deps, build, flags, config, shortcuts
-├── Makefile                   # src/*.c -> build/*.o -> bin/k-term; test/test-cli/asan/run/clean; WARN set
+├── Makefile                   # src/*.c -> build/*.o -> bin/kai-term; test/test-cli/asan/run/clean; WARN set
 ├── docs/ARCHITECTURE.md       # module map, event loop, grid invariants, reflow, color emoji, debug entry points
-├── include/k-term/k-term.h    # the single shared header (all types + prototypes)
-├── src/                       # config.c vt.c pty.c font.c render.c main.c
-├── tests/test_vt.c            # 364 checks: parser, grid, selection (incl. sub-cell), alt screen,
+├── include/kai-term/kai-term.h  # the single shared header (all types + prototypes)
+├── src/                       # config.c vt.c mux.c layout.c pty.c font.c render.c main.c
+├── tests/test_vt.c            # 501 checks: parser, grid, selection (incl. sub-cell), alt screen,
 │                              #   live_off, emoji clusters (ZWJ / skin tone / VS16 / keycap / flag pair),
 │                              #   CSI 3 J, bracketed paste, term_init guard, REFLOW (round trip, cursor,
 │                              #   wide pairs, eviction, hard breaks, coloured blanks, alt screen),
 │                              #   term_grid_geometry (padding + the pointer/cell sweep), the zoom/alt-screen
-│                              #   row-shrink rule, a viewport grown past half of rcap (the row[] overrun)
+│                              #   row-shrink rule, a viewport grown past half of rcap (the row[] overrun),
+│                              #   the evdev -> SGR button mapping, mux (tab open/close/goto/next/prev,
+│                              #   max_tabs, mux_title, the ps.t re-arm), keybind/keymods parsing, the
+│                              #   multiplexing config keys, and layout_compute (bar strip, item rects +
+│                              #   labels, pane rects, the hit tests, layout_grid_size, and the
+│                              #   layout_initial_size round trip that pins the startup height)
 ├── tests/dbg.c                # grid-model invariant checker (ed3*, resize, reflow, grow-then-scroll and
 │                              #   zoom/alt-screen permutation stages)
-├── tests/cli_test.sh          # 77 checks over the real bin/k-term: every flag, long form, error message
-│                              #   and exit code (main() is in no test binary, so this is the only honest
-│                              #   way to cover argv); run by `make test-cli`, which `make test` needs
-├── bin/                       # k-term, test_vt, dbg (+ *_asan)   [generated]
+├── tests/cli_test.sh          # 86 checks over the real bin/kai-term: every flag, long form, error message
+│                              #   and exit code, plus the multiplexing/layout config keys and the `layout:`
+│                              #   log line (main() is in no test binary, so this is the only honest way to
+│                              #   cover argv); run by `make test-cli`, which `make test` needs.
+├── bin/                       # kai-term, test_vt, dbg (+ *_asan)   [generated]
 └── build/                     # *.o + generated/xdg-shell-*        [generated]
 ```
-- `src/vt.c` — the unit-tested core: parser + grid + selection + alt screen. No Wayland/GL deps.
+- `src/vt.c` — the unit-tested core: parser + grid + selection + alt screen + the evdev -> SGR mouse-button
+  mapping (`mouse_sgr_button`) + `term_grid_geometry()`. No Wayland/GL deps.
 - `src/main.c` — all Wayland input/shell/clipboard/epoll logic; look here for anything involving
   pointer, keyboard, resize, or frame pacing.
 - `src/render.c` — EGL + GL 2.x, two atlases (alpha8 mono + RGBA8 color emoji), one shader, one draw
@@ -1016,8 +1887,17 @@ K-Term/
 - `src/font.c` — fontconfig + FreeType alpha8 atlas, shelf packer, hash cache, fontconfig fallback
   faces, HarfBuzz-shaped color emoji (`font_color_glyph`) + RGBA8 color atlas, `font_resize`.
 - `src/pty.c` — PTY spawn, child session setup, resize, TERM/COLORTERM/TERM_PROGRAM env.
-- `src/config.c` — `key = value` config parser + defaults + clamping.
-- `Makefile` — pkg-config-driven; `-Iinclude/k-term -Ibuild/generated`; output dirs created by
+- `src/config.c` — `key = value` config parser + defaults + clamping, and the key-binding spec parser
+  (`keybind_parse`/`keymods_parse`).
+- `src/mux.c` — the tab bookkeeping of one window: the dense `Tab` array, active index, open/close/goto/
+  next/prev, the attention flag and `mux_title()`. No Wayland, no EGL, no fd, no fork — that is what makes
+  it unit-testable.
+- `src/layout.c` — pure geometry: window px + cell px + padding + mode + the tab list in, the bar strip,
+  item rects + labels and the pane rects (each with its cols/rows) out, plus the hit tests,
+  `layout_grid_size()` (the one grid size every session of a layout gets) and `layout_initial_size()` (the
+  window to ask for at startup, the inverse of `layout_compute()`). main.c resizes/hit-tests through it,
+  render.c draws exactly what it says.
+- `Makefile` — pkg-config-driven; `-Iinclude/kai-term -Ibuild/generated`; output dirs created by
   order-only prerequisites so they never force rebuilds; targets `all test test-cli asan run clean`.
 
 ## Key Decisions & Pitfalls
@@ -1052,8 +1932,13 @@ exist). Bug root causes are in ISSUES.md "Fixed". The decisions below are projec
   fontconfig, harfbuzz (required since session 37 — README must keep listing it), EGL/GL only —
   deliberately no cairo/pango/Qt/GUI framework. xdg-shell bindings are generated at build time, not
   vendored. (Full list in README.md.)
-- **Naming:** project/binary/identifiers use `k-term` (`k_term` for C identifiers).
-- **Layout:** sources in `src/`, public header in `include/k-term/`, tests in `tests/`, binaries in
+- **Naming:** project/binary/identifiers use `kai-term` (`kai_term` for C identifiers), the display name is
+  `Kai-Term`. RENAMED from `K-Term`/`k-term` on 2026-10-16 (session 59) at the user's request, to avoid a
+  name conflict with another project of theirs — do not "restore" the short form anywhere: the directory,
+  `bin/kai-term`, `include/kai-term/kai-term.h`, `DEF_APP_ID`/`DEF_TITLE` ("Kai-Term"), the log prefix
+  `kai-term <level>:`, `TERM_PROGRAM=kai-term` and `~/.config/kai-term/kai-term.conf` all have to move
+  together, and tests/test_vt.c pins the two `DEF_*` literals so a half-rename fails a check.
+- **Layout:** sources in `src/`, public header in `include/kai-term/`, tests in `tests/`, binaries in
   `bin/`, objects + generated bindings in `build/`, extra docs in `docs/`. `make clean` deletes
   `bin/` and `build/` entirely.
 - **License:** MIT (`LICENSE`, "Copyright (c) 2026 Kaida"), the user's choice. MIT requires the
@@ -1075,6 +1960,27 @@ exist). Bug root causes are in ISSUES.md "Fixed". The decisions below are projec
   before moving on. Session 55's accident cut a Progress entry in half and moved it next to a heading it
   quoted; it was repaired from `/tmp/s55/AGENT.md.before_repair`, and the entry that describes it is the
   session-54 one.
+- **Pitfall — a log line that prints the value it was GIVEN can lie.** `tab_switch(idx)` logged `mux: tab
+  idx/n visible` while nothing had changed the active tab, so the log looked like proof that the click worked
+  and the bug survived every reading of it (session 61). A log line about state must print what the owner of
+  that state REPORTS (`mux_active()` after `mux_goto()`), not the requested value.
+- **Pitfall — the evdev button order is not the protocol order.** `BTN_LEFT` 0x110, `BTN_RIGHT` 0x111,
+  `BTN_MIDDLE` 0x112, but SGR numbers them 0 left, 1 middle, 2 right. A switch that assumes the kernel order
+  is `BTN_RIGHT`/`BTN_MIDDLE` swapped — silently, in both the bar's middle-click-close and every SGR mouse
+  report to vim/htop. The mapping is `mouse_sgr_button()` in src/vt.c with the raw literals pinned by checks
+  (ISSUES.md "Fixed").
+- **Decision — geometry lives in src/layout.c, not in main.c.** main.c is in no test binary, so any arithmetic
+  left there is untestable, and the tab bar + panes need N rectangles with N origins, which one global offset
+  cannot express. `layout_compute()` (bar strip, item rects, labels, pane rects, cols/rows per pane),
+  `layout_grid_size()` (the one size every session of a layout gets, so a tab switch never resizes) and
+  `layout_initial_size()` (the window to ask for at startup) are pure functions, and the round trip
+  `layout_initial_size()` -> `layout_compute()` -> `layout_grid_size()` is what proves the startup height is
+  right — that check is exactly what caught the `cell_w`/`cell_h` typo (session 62). The same reasoning put
+  `mouse_sgr_button()` in vt.c.
+- **Pitfall — `Term`'s pen must never colour the chrome.** A `Term`'s fg/bg are the application's CURRENT SGR
+  pen, so drawing the tab bar from them would let a `printf '\e[31m'` repaint the bar that names the tab. The
+  bar and the focus border are mixed from `Render.bg`/`Render.fg`, which come from the CONFIGURED palette
+  (`render_init(..., uint32_t bg, uint32_t fg)`).
 - **Pitfall — a `(void)x;` line does not mean `x` is unused.** `csi_dispatch` carried `(void)def1;`,
   which reads like "this local is a leftover"; deleting `def1` broke the build because it is really used
   by `CSI J` (erase display), `CSI K` (erase line) and `CSI 6 n` (CPR). Session 50 removed only the cast
@@ -1082,7 +1988,7 @@ exist). Bug root causes are in ISSUES.md "Fixed". The decisions below are projec
   confirm it (`make` after every removal).
 - **Pitfall — `Term` is not a place for settings.** `ESC c` / RIS calls `term_init`, which `memset`s the
   whole `Term` (vt.c), so anything stored there is wiped by a reset. Process-wide settings live as
-  file-scope values with a setter (`k_term_loglevel`, `g_clear_scrollback`) and are applied from the
+  file-scope values with a setter (`kai_term_loglevel`, `g_clear_scrollback`) and are applied from the
   config in main.c. (`bracketed_paste` is deliberately the opposite case: it is application-negotiated
   state, so a reset SHOULD clear it.)
 - **Pitfall — a boolean "is it initialized" flag cannot survive uninitialized memory.** `Grid.valid` is a
@@ -1113,17 +2019,17 @@ exist). Bug root causes are in ISSUES.md "Fixed". The decisions below are projec
   included; otherwise `kept` can exceed `rcap` and the commit drops buffers instead of installing them
   (a leak). `ulen[]` is precomputed once and used for BOTH the cursor's logical column and the chunk walk
   so the two cannot disagree.
-- **Pitfall — a K-Term-to-K-Term clipboard test proves nothing.** Every paste test run before session 49
-  moved text between two K-Term instances, which works even if the client never shares its selection with
+- **Pitfall — a Kai-Term-to-Kai-Term clipboard test proves nothing.** Every paste test run before session 49
+  moved text between two Kai-Term instances, which works even if the client never shares its selection with
   the rest of the desktop. The only meaningful test uses a FOREIGN client: `wl-copy` in, `wl-paste` out
   (`wl-paste --list-types` also shows what the compositor advertises for the current owner). Related: a
   Wayland clipboard is not a buffer the client can read on demand — the compositor pushes an offer
   (`wl_data_device.selection`) and the source serves the bytes on request, so "paste" only works if the
   earlier "copy" actually called `set_selection`. With `copy_on_release = 0` (the default since session 43)
   a mouse drag does NOT call it; only `Ctrl`+`Shift`+`C` does. That is the behaviour that reads like
-  "K-Term keeps a private clipboard".
+  "Kai-Term keeps a private clipboard".
 - **Pitfall — identifying a test window on the user's compositor.** Never by title (session 42 closed the
-  user's pcmanfm-qt window because its title was "K-Term"); `$!` after `timeout ./bin/k-term &` is the
-  timeout wrapper's pid, not k-term's. Use "the window id that appeared after launch" (`.scratch/reflow_live.sh`
+  user's pcmanfm-qt window because its title was "K-Term" (the pre-rename `DEF_TITLE`); `$!` after `timeout ./bin/kai-term &` is the
+  timeout wrapper's pid, not kai-term's. Use "the window id that appeared after launch" (`.scratch/reflow_live.sh`
   does). niri's `--json windows` has no absolute screen position, so screenshots cannot be cropped to a
   window from it, and tiling/floating moves the OTHER windows too, which breaks screenshot pixel-diffs.

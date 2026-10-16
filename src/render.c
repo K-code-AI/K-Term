@@ -1,9 +1,15 @@
-/* K-Term — renderer: EGL + OpenGL 2.x, one textured-quad batch per frame.
+/* Kai-Term — renderer: EGL + OpenGL 2.x, one textured-quad batch per frame.
+ *
+ * A frame is whatever src/layout.c says it is (see Layout in kai-term.h): the tab bar strip, then one grid
+ * per pane (one pane in tab view, up to split_max panes side by side). Every rectangle carries its own
+ * origin, so there is no global grid offset any more.
  *
  * Each visible cell emits:
  *   - a background quad (samples dummy white atlas pixel, color = cell bg)
  *   - a glyph quad: a mono glyph (alpha8 atlas, tinted by the cell fg) or a COLOR emoji
  *     (RGBA8 color atlas, premultiplied, not tinted) — see a_glyph in the fragment shader
+ * The bar adds one background + one separator + one glyph per character per item, and side-by-side view
+ * adds four quads for the focus border. All of it is one draw call.
  *
  * Hardware instancing (GL_ARB_draw_instanced + GL_ARB_instanced_arrays) is used when the
  * driver advertises both extensions: a static unit-quad VBO supplies the per-vertex corner
@@ -16,7 +22,7 @@
    set; must be defined before any GL header is included. */
 #define GL_GLEXT_PROTOTYPES 1
 
-#include "k-term.h"
+#include "kai-term.h"
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -229,7 +235,7 @@ static void set_clear_color(Render *r)
 }
 
 int render_init(Render *r, void *wl_display, void *egl_window, int w, int h, float opacity,
-                uint32_t bg)
+                uint32_t bg, uint32_t fg)
 {
     memset(r, 0, sizeof(*r));
     r->vw = w;
@@ -318,6 +324,7 @@ int render_init(Render *r, void *wl_display, void *egl_window, int w, int h, flo
     r->nwin = egl_window;
     r->opacity = fclamp_(opacity, 0.0f, 1.0f);
     r->bg = bg;
+    r->fg = fg;   /* the tab bar's text colour (see Render.fg) */
     r->ecfg = malloc(sizeof(cfg));
     if (r->ecfg)
         memcpy(r->ecfg, &cfg, sizeof(cfg));
@@ -343,10 +350,12 @@ int render_init(Render *r, void *wl_display, void *egl_window, int w, int h, flo
     return 0;
 }
 
-static float *ensure_vdata(Render *r, int rows, int cols)
+static float *ensure_vdata(Render *r, int max_quads)
 {
-    /* worst case per cell: bg quad + selection overlay quad + glyph quad = 3 records */
-    int need = rows * cols * 3 * FLOATS_PER_INST;
+    /* The caller counts the quads this frame can emit: at most 3 per grid cell (background + selection
+       band + glyph) plus the chrome (one background and one separator per bar item, one glyph per label
+       character, four for the focus border). */
+    int need = max_quads * FLOATS_PER_INST;
     if (need > r->vcap) {
         free(r->vdata);
         r->vcap = need;
@@ -357,10 +366,10 @@ static float *ensure_vdata(Render *r, int rows, int cols)
     return r->vdata;
 }
 
-static float *ensure_edata(Render *r, int rows, int cols)
+static float *ensure_edata(Render *r, int max_quads)
 {
-    /* fallback expansion: 3 quads/cell (bg + selection overlay + glyph) * 6 verts/quad */
-    int need = rows * cols * 3 * 6 * FLOATS_PER_VERT;
+    /* fallback expansion: 6 vertices per quad, FLOATS_PER_VERT floats per vertex */
+    int need = max_quads * 6 * FLOATS_PER_VERT;
     if (need > r->ecap) {
         free(r->edata);
         r->ecap = need;
@@ -446,110 +455,225 @@ static void set_attribs_instanced(Render *r)
         set_div(i, 1);
 }
 
-int render_draw(Render *r, Term *t, Font *f)
+/* ---------- the frame: the tab bar plus one grid per pane ---------- */
+
+/* Blend two ARGB colours, k100 = percent of b (0..100). Only the CHROME uses this: the cells keep their
+   own colours untouched, so an application that repaints its palette still cannot repaint the bar. */
+static uint32_t mix_c(uint32_t a, uint32_t b, int k100)
 {
-    Grid *g = &t->g;
+    uint32_t out = 0;
+    for (int sh = 0; sh < 32; sh += 8) {
+        int av = (int)((a >> sh) & 0xff), bv = (int)((b >> sh) & 0xff);
+        int v = av + (bv - av) * k100 / 100;
+        out |= (uint32_t)(v < 0 ? 0 : (v > 255 ? 255 : v)) << sh;
+    }
+    return out;
+}
+
+/* Decode one UTF-8 sequence of a tab-bar label. A tab's title arrives through OSC 0/2, so a label is
+   arbitrary UTF-8; a stray continuation byte becomes U+FFFD, which the font draws as its notdef box. */
+static uint32_t next_cp(const char **pp)
+{
+    const unsigned char *s = (const unsigned char *)*pp;
+    uint32_t cp = *s++;
+    int need = 0;
+    if (cp >= 0xf0) { cp &= 0x07u; need = 3; }
+    else if (cp >= 0xe0) { cp &= 0x0fu; need = 2; }
+    else if (cp >= 0xc0) { cp &= 0x1fu; need = 1; }
+    else if (cp >= 0x80) { *pp = (const char *)s; return 0xfffd; }
+    for (int i = 0; i < need; i++) {
+        if (s[0] < 0x80 || s[0] >= 0xc0)
+            break;
+        cp = (cp << 6) | (uint32_t)(s[0] & 0x3f);
+        s++;
+    }
+    *pp = (const char *)s;
+    return cp;
+}
+
+/* Everything one pane needs in all three passes, computed once per pane per frame. */
+typedef struct {
+    Term *t;
+    Grid *g;
+    const PaneGeom *pg;
+    int nrows, ncols;    /* the grid, clamped to what the pane can hold */
+    float gx;            /* the grid's left edge in buffer px (== the pane's x: no inner margin) */
+    float pad_gl;        /* GL y of the bottom of the last drawn row */
+    int sel_on;
+    SelSpan selspan;
+} PaneDraw;
+
+static void pane_prepare(Render *r, Term *t, const PaneGeom *pg, Font *f, PaneDraw *pd)
+{
+    float cw = (float)f->cell_w * f->scale;
+    float ch = (float)f->cell_h * f->scale;
+    pd->t = t;
+    pd->g = &t->g;
+    pd->pg = pg;
+    /* Never draw more than the pane holds. main.c resizes every displayed session to its pane, so this
+       only bites on a grid that has not caught up with a layout change yet — and then it stops the
+       drawing from spilling into the neighbouring pane. */
+    int cwi = imax_((int)(cw + 0.5f), 1), chi = imax_((int)(ch + 0.5f), 1);
+    pd->nrows = iclamp_(pd->g->rows, 0, pg->h / chi);
+    pd->ncols = iclamp_(pd->g->cols, 0, pg->w / cwi);
+    pd->gx = (float)pg->x;
+    /* Window y grows down while GL y grows up, and the grid's TOP row starts at the pane's top edge, so
+       the pixels that do not fill a whole row fall BELOW the last row and those that do not fill a whole
+       column fall to the RIGHT. That is the same remainder rule the pointer mapping depends on
+       (term_grid_geometry), now applied inside each pane instead of inside the window: viewport row y
+       occupies window pixels [pg->y + y*ch, pg->y + (y+1)*ch) and column x occupies
+       [pg->x + x*cw, pg->x + (x+1)*cw), which is exactly what main.c's sel_cell()/mouse_cell() compute. */
+    pd->pad_gl = (float)r->vh - (float)pg->y - (float)pd->nrows * ch;
+    if (pd->pad_gl < 0.0f)
+        pd->pad_gl = 0.0f;
+    pd->sel_on = t->sel_active;
+    if (pd->sel_on)
+        term_selection_span(t, &pd->selspan);
+}
+
+/* The session a pane shows. `terms` is indexed by TAB index (see the render_draw comment in kai-term.h). */
+static Term *pane_term(Term *const *terms, int tab)
+{
+    if (!terms || tab < 0 || tab >= TAB_MAX)
+        return NULL;
+    return terms[tab];
+}
+
+int render_draw(Render *r, Font *f, const Layout *lay, Term *const *terms)
+{
     glClear(GL_COLOR_BUFFER_BIT);
 
-    float *vdata = ensure_vdata(r, g->rows, g->cols);
-    float fg[4], bg[4];
     float cw = (float)f->cell_w * f->scale;
     float ch = (float)f->cell_h * f->scale;
     float ascent = (float)f->ascent * f->scale;
     const float white[4] = { 1, 1, 1, 1 };
-    float selc[4];
-    col2f(SEL_BG, selc);
-    /* Window transparency (Config.opacity): the cell/selection/cursor colours are opaque ARGB, so the
-       alpha is scaled here and carried to the shader in a_bg.a. Ink keeps alpha 1 (see fs_src), only the
-       background becomes see-through. opacity == 1 leaves every value untouched. */
-    selc[3] *= r->opacity;
-
-    SelSpan selspan;
-    int sel_on = t->sel_active;
-    if (sel_on)
-        term_selection_span(t, &selspan);
-
-    /* The grid is anchored at (gx, gy) in window pixels — the Config.padding margin, handed over by
-       main.c through render_set_origin() from the SAME term_grid_geometry() call that chose cols/rows
-       and that main.c uses to map the pointer (row = (ptr_y - gy)/cell_h, col = (ptr_x - gx)/cell_w).
-       Viewport row y therefore occupies window pixels [gy + y*ch, gy + (y+1)*ch) and column x occupies
-       [gx + x*cw, gx + (x+1)*cw). The pixels left over after whole cells (cur_h - 2*gy - rows*ch, non-zero
-       after almost every compositor configure: e.g. 10 px on a 16 px cell) belong at the BOTTOM/RIGHT,
-       never at the top/left — putting them there instead made floor((ptr_y - gy)/cell_h) name the row
-       BELOW the pointer for most of each row's height, so the selection (and SGR mouse reporting)
-       landed on the wrong line. gy == gx == 0 is the old edge-to-edge layout. */
-    float grid_x = (float)r->gx;   /* NOT named gx: the color-emoji branch below has a local gx */
-    /* GL y grows upward while window y grows downward, so the grid's top edge sits at GL y =
-       vh - gy - rows*ch above the bottom of the buffer: the configured margin plus the remainder. */
-    float pad = (float)r->vh - (float)r->gy - (float)g->rows * ch;
-    if (pad < 0.0f)
-        pad = 0.0f;
-
-    float *vp = vdata;
-    int nquads = 0;
     const float du = 1.0f / (float)f->atlas_w, dv = 1.0f / (float)f->atlas_h;
 
-    /* Three passes, back to front: (1) every cell's background, (2) the selection bands,
-       (3) the glyphs. Drawing all backgrounds before any glyph is required now that font
-       fallback makes WIDE glyphs (CJK/emoji) actually render: a wide glyph quad spans into the
-       following cell, and the old per-cell order emitted that next cell's background quad AFTER
-       the glyph, painting over (clipping) the glyph's right half. With backgrounds first, a
-       glyph is never covered by a neighbouring background. Layer order is unchanged
-       (background < selection band < glyph), so selection legibility and the cursor block are
-       identical to before. */
+    /* Window transparency (Config.opacity): the cell/selection/cursor and chrome colours are opaque
+       ARGB, so the alpha is scaled here and carried to the shader in a_bg.a. Ink keeps alpha 1 (see
+       fs_src), only the background becomes see-through. opacity == 1 leaves every value untouched. */
+    float selc[4];
+    col2f(SEL_BG, selc);
+    selc[3] *= r->opacity;
 
-    /* Pass 1: background quads (always, so the window is fully painted). An unselected block
-       cursor paints its block here; a selected cursor cell keeps its own background (the band
-       in pass 2 marks it). */
-    for (int y = 0; y < g->rows; y++) {
-        const Cell *row = grid_vprow(g, y);
-        for (int x = 0; x < g->cols; x++) {
-            const Cell *c = &row[x];
-            uint32_t cellbg = c->bg;
-            if (c->attr & ATTR_INVERSE)
-                cellbg = c->fg;
-            int is_cursor = t->show_cursor && g->scroll_off == g->live_off &&
-                            x == t->cx && y == t->cy;
-            if (is_cursor) {
-                int hl_on = 0;
-                if (sel_on) {
-                    float h0, hw;
-                    sel_band_pixels(&selspan, g->cols, x, y, cw, &h0, &hw);
-                    /* must match pass 2 exactly: the block cursor is only hidden where a band is
-                       actually painted, otherwise a selection covering the (empty) cursor cell would
-                       erase the cursor without replacing it with a highlight */
-                    hl_on = hw > 0.0f && term_cell_highlightable(t, x, y);
+    /* Chrome colours, mixed from the configured palette (Render.bg/Render.fg): the visible session's bar
+       item uses the selection highlight, the others a background nudged toward the foreground with dimmed
+       text, and the cursor of a session that is DRAWN but not the visible one is dimmed too — so a
+       side-by-side window still shows which session the keyboard talks to. */
+    uint32_t item_off_bg = mix_c(r->bg, r->fg, 10);
+    uint32_t item_off_fg = mix_c(r->fg, r->bg, 45);
+    uint32_t item_on_bg  = SEL_BG;
+    uint32_t sep_col     = mix_c(r->fg, r->bg, 65);
+    uint32_t cur_off     = mix_c(CURSOR_COL, r->bg, 55);
+    uint32_t border_col  = SEL_BG;
+
+    /* Staging space: at most 3 quads per grid cell (background + band + glyph), at most
+       (BAR_LABEL_MAX + 2) per bar item (label glyphs + background + separator), and 4 for the border. */
+    int cells = 0;
+    for (int p = 0; p < lay->npane; p++)
+        cells += lay->pane[p].cols * lay->pane[p].rows;
+    int maxq = 3 * cells + lay->nitem * (BAR_LABEL_MAX + 2) + 4;
+    float *vdata = ensure_vdata(r, maxq);
+    float *vp = vdata;
+    int nquads = 0;
+    float bg[4], fg[4];
+
+    /* Three passes, back to front, over EVERY pane: (1) backgrounds, (2) selection bands, (3) glyphs.
+       All backgrounds of all panes go before any glyph because a WIDE glyph's quad spans into the next
+       cell — in side-by-side mode that also keeps a pane's glyph from being clipped by its neighbour's
+       background. The chrome is appended at the end of the pass it belongs to, so it sits on top of the
+       grid it borders. There is no GL blending: within one draw call the later quad simply wins, which is
+       what the existing pass order already relies on. */
+
+    /* Pass 1: cell backgrounds (always, so every pane is fully painted). An unselected block cursor
+       paints its block here; a selected cursor cell keeps its own background (the band in pass 2 marks
+       it). */
+    for (int p = 0; p < lay->npane; p++) {
+        Term *t = pane_term(terms, lay->pane[p].tab);
+        if (!t)
+            continue;
+        PaneDraw pd;
+        pane_prepare(r, t, &lay->pane[p], f, &pd);
+        uint32_t cur_col = (lay->pane[p].tab == lay->active_tab) ? CURSOR_COL : cur_off;
+        for (int y = 0; y < pd.nrows; y++) {
+            const Cell *row = grid_vprow(pd.g, y);
+            for (int x = 0; x < pd.ncols; x++) {
+                const Cell *c = &row[x];
+                uint32_t cellbg = c->bg;
+                if (c->attr & ATTR_INVERSE)
+                    cellbg = c->fg;
+                int is_cursor = t->show_cursor && pd.g->scroll_off == pd.g->live_off &&
+                                x == t->cx && y == t->cy;
+                if (is_cursor) {
+                    int hl_on = 0;
+                    if (pd.sel_on) {
+                        float h0, hw;
+                        sel_band_pixels(&pd.selspan, pd.g->cols, x, y, cw, &h0, &hw);
+                        /* must match pass 2 exactly: the block cursor is only hidden where a band is
+                           actually painted, otherwise a selection covering the (empty) cursor cell would
+                           erase the cursor without replacing it with a highlight */
+                        hl_on = hw > 0.0f && term_cell_highlightable(t, x, y);
+                    }
+                    if (!hl_on)
+                        cellbg = cur_col;
                 }
-                if (!hl_on)
-                    cellbg = CURSOR_COL;
+                col2f(cellbg, bg);
+                bg[3] *= r->opacity;
+                float px = pd.gx + x * cw, py = (pd.nrows - 1 - y) * ch + pd.pad_gl;
+                emit_quad(&vp, px, py, cw, ch, du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f,
+                          white, bg, 0.0f, 0.0f, 0.0f);
+                nquads++;
             }
-            col2f(cellbg, bg);
-            bg[3] *= r->opacity;
-            float px = grid_x + x * cw, py = (g->rows - 1 - y) * ch + pad;   /* GL y up, grid at (gx,gy) */
-            emit_quad(&vp, px, py, cw, ch, du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f,
-                      white, bg, 0.0f, 0.0f, 0.0f);
-            nquads++;
         }
     }
 
-    /* Pass 2: selection overlay bands (over the background, under the glyphs). Drawn for every
-       covered cell that holds something, including the cursor cell, so the highlight always matches
-       what term_selection_text() copies. hl0 is already an absolute pixel x — do NOT add px again. */
-    if (sel_on) {
-        for (int y = 0; y < g->rows; y++) {
-            for (int x = 0; x < g->cols; x++) {
-                /* No band over empty space. A cell that was never written (ch == 0)
-                   has nothing to highlight, so a selection that reaches past the end of a line stops
-                   at the last glyph instead of painting the whole window. A real space (' ') and the
-                   continuation cell of a wide glyph DO get the band — see term_cell_highlightable. */
+    /* The bar: one background per item (the strip itself is the clear colour), and a 1 px separator at
+       the left edge of every item but the first so two inactive items do not merge into one block. */
+    float bar_gl = 0.0f;
+    if (lay->bar_on) {
+        bar_gl = (float)r->vh - (float)lay->bar_y - (float)lay->bar_h;
+        for (int i = 0; i < lay->nitem; i++) {
+            const BarItem *it = &lay->item[i];
+            col2f(it->active ? item_on_bg : item_off_bg, bg);
+            bg[3] *= r->opacity;
+            emit_quad(&vp, (float)it->x, bar_gl, (float)it->w, (float)lay->bar_h,
+                      du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f, white, bg, 0.0f, 0.0f, 0.0f);
+            nquads++;
+            if (i > 0) {
+                col2f(sep_col, bg);
+                bg[3] *= r->opacity;
+                emit_quad(&vp, (float)it->x, bar_gl, 1.0f, (float)lay->bar_h,
+                          du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f, white, bg, 0.0f, 0.0f, 0.0f);
+                nquads++;
+            }
+        }
+    }
+
+    /* Pass 2: selection overlay bands (over the background, under the glyphs), per pane. Drawn for every
+       covered cell that holds something, including the cursor cell, so the highlight always matches what
+       term_selection_text() copies. hl0 is already an absolute pixel x — do NOT add px again.
+       The band edges are absolute buffer px and panes never overlap in x, so a band can never tint a
+       glyph of a different pane (the shader compares the fragment's absolute x). */
+    for (int p = 0; p < lay->npane; p++) {
+        Term *t = pane_term(terms, lay->pane[p].tab);
+        if (!t || !t->sel_active)
+            continue;
+        PaneDraw pd;
+        pane_prepare(r, t, &lay->pane[p], f, &pd);
+        for (int y = 0; y < pd.nrows; y++) {
+            for (int x = 0; x < pd.ncols; x++) {
+                /* No band over empty space. A cell that was never written (ch == 0) has nothing to
+                   highlight, so a selection that reaches past the end of a line stops at the last glyph
+                   instead of painting the whole window. A real space (' ') and the continuation cell of a
+                   wide glyph DO get the band — see term_cell_highlightable. */
                 if (!term_cell_highlightable(t, x, y))
                     continue;
                 float hl0 = 0, hlw = 0;
-                sel_band_pixels(&selspan, g->cols, x, y, cw, &hl0, &hlw);
+                sel_band_pixels(&pd.selspan, pd.g->cols, x, y, cw, &hl0, &hlw);
                 if (hlw <= 0.0f)
                     continue;
-                float py = (g->rows - 1 - y) * ch + pad;
-                emit_quad(&vp, grid_x + hl0, py, hlw, ch,
+                float py = (pd.nrows - 1 - y) * ch + pd.pad_gl;
+                emit_quad(&vp, pd.gx + hl0, py, hlw, ch,
                           du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f,
                           white, selc, 0.0f, 0.0f, 0.0f);
                 nquads++;
@@ -557,119 +681,177 @@ int render_draw(Render *r, Term *t, Font *f)
         }
     }
 
-    /* Pass 3: glyph quads (topmost). Continuation cells of a wide char are skipped (the wide
-       glyph is drawn from its anchor cell). The glyph quad carries the cell's own background;
-       the fragment shader picks the selection colour per-fragment where the glyph's pixel x
-       falls inside [band0,band1), giving true sub-glyph selection without GL blending. */
-    for (int y = 0; y < g->rows; y++) {
-        const Cell *row = grid_vprow(g, y);
-        for (int x = 0; x < g->cols; x++) {
-            const Cell *c = &row[x];
-            if (!c->ch || (c->attr & ATTR_WIDE))
-                continue;
-
-            /* Color emoji first: the cell's whole cluster (anchor + its continuation
-               codepoints) is shaped by HarfBuzz into ONE color glyph. When the color font has
-               nothing for that sequence we fall back to the mono glyph from the fontconfig
-               fallback face (session 35), so emoji still draw on a box with no color font.
-               seq/nseq stay in scope for the whole cell: the same sequence also decides the
-               quad's span (cluster_is_wide below). */
-            uint32_t seq[CLUSTER_MAX + 1];
-            int nseq = 0;
-            ColorGlyph *cg = NULL;
-            if (f->color_ok && (c->nextra || cp_is_emoji(c->ch))) {
-                nseq = 1;
-                seq[0] = c->ch;
-                for (int k = 0; k < (int)c->nextra && nseq <= CLUSTER_MAX; k++)
-                    seq[nseq++] = c->extra[k];
-                cg = font_color_glyph(f, seq, nseq);
-            }
-            Glyph *gl_ = NULL;
-            if (!cg) {
-                gl_ = font_glyph(f, c->ch);
-                if (gl_->w <= 0 || gl_->h <= 0)
+    /* Pass 3: glyph quads (topmost), per pane. Continuation cells of a wide char are skipped (the wide
+       glyph is drawn from its anchor cell). The glyph quad carries the cell's own background; the
+       fragment shader picks the selection colour per-fragment where the glyph's pixel x falls inside
+       [band0,band1), giving true sub-glyph selection without GL blending. */
+    for (int p = 0; p < lay->npane; p++) {
+        Term *t = pane_term(terms, lay->pane[p].tab);
+        if (!t)
+            continue;
+        PaneDraw pd;
+        pane_prepare(r, t, &lay->pane[p], f, &pd);
+        for (int y = 0; y < pd.nrows; y++) {
+            const Cell *row = grid_vprow(pd.g, y);
+            for (int x = 0; x < pd.ncols; x++) {
+                const Cell *c = &row[x];
+                if (!c->ch || (c->attr & ATTR_WIDE))
                     continue;
-            }
 
-            uint32_t cellbg = c->bg, cellfg = c->fg;
-            if (c->attr & ATTR_INVERSE) {
-                uint32_t tmp = cellbg;
-                cellbg = cellfg;
-                cellfg = tmp;
-            }
-            float hl0 = 0, hlw = 0;
-            int hl_on = 0;
-            if (sel_on) {
-                sel_band_pixels(&selspan, g->cols, x, y, cw, &hl0, &hlw);
-                hl_on = hlw > 0.0f;
-            }
-            /* The shader compares the fragment's ABSOLUTE buffer pixel x with the band edges, so the
-               band must carry the grid origin exactly like the quad origin below does. */
-            float band0 = hl_on ? grid_x + hl0 : 0.0f;
-            float band1 = hl_on ? grid_x + hl0 + hlw : 0.0f;
-            int is_cursor = t->show_cursor && g->scroll_off == g->live_off &&
-                            x == t->cx && y == t->cy;
-            if (is_cursor) {
-                uint32_t oldbg = cellbg;
-                if (hl_on) {
-                    cellfg = CURSOR_COL;   /* selected cursor: tint glyph, band already drawn */
-                } else {
-                    cellbg = CURSOR_COL;   /* unselected: glyph composites over the block */
-                    cellfg = oldbg;        /* invert ink under the block cursor */
+                /* Color emoji first: the cell's whole cluster (anchor + its continuation codepoints) is
+                   shaped by HarfBuzz into ONE color glyph. When the color font has nothing for that
+                   sequence we fall back to the mono glyph from the fontconfig fallback face (session 35),
+                   so emoji still draw on a box with no color font. seq/nseq stay in scope for the whole
+                   cell: the same sequence also decides the quad's span (cluster_is_wide below). */
+                uint32_t seq[CLUSTER_MAX + 1];
+                int nseq = 0;
+                ColorGlyph *cg = NULL;
+                if (f->color_ok && (c->nextra || cp_is_emoji(c->ch))) {
+                    nseq = 1;
+                    seq[0] = c->ch;
+                    for (int k = 0; k < (int)c->nextra && nseq <= CLUSTER_MAX; k++)
+                        seq[nseq++] = c->extra[k];
+                    cg = font_color_glyph(f, seq, nseq);
                 }
-            }
-            col2f(cellfg, fg);
-            col2f(cellbg, bg);
-            /* The glyph quad composites the ink over ITS OWN copy of the cell background, so that
-               background must carry the window opacity exactly like pass 1's quad does. It used to stay
-               at alpha 1, which is what made every glyph's bounding box opaque. */
-            bg[3] *= r->opacity;
-
-            float px = grid_x + x * cw, py = (g->rows - 1 - y) * ch + pad;
-
-            if (cg) {
-                /* The color bitmap carries UNSCALED strike metrics (128px strike on this box),
-                   so the scale factor is cell-height / strike-height: zooming resizes the quad
-                   without ever re-rasterizing the emoji. An emoji fills its cell box; a WIDE
-                   emoji gets the 2-cell span it reserved, so it is never squished. */
-                float s = ch / (float)f->color_px;
-                float gw = (float)cg->w * s, gh = (float)cg->h * s;
-                /* The span is the WHOLE cluster's width, not just the base codepoint's: vt.c
-                   reserved 2 cells for a wide cluster, including clusters whose wide (emoji)
-                   presentation only appears once a modifier is folded in (U+2764 U+FE0F, the
-                   keycaps, a regional-indicator pair). cluster_is_wide is the same predicate
-                   vt.c used, so the quad always matches the reservation. */
-                float span = cluster_is_wide(seq, nseq) ? 2.0f * cw : cw;
-                if (gw > span) {
-                    float k = span / gw;
-                    gw *= k;
-                    gh *= k;
+                Glyph *gl_ = NULL;
+                if (!cg) {
+                    gl_ = font_glyph(f, c->ch);
+                    if (!gl_ || gl_->w <= 0 || gl_->h <= 0)
+                        continue;
                 }
-                float gx = px + (span - gw) * 0.5f;   /* centered in the cell span */
-                float gy = py + (ch - gh) * 0.5f;     /* centered in the line box */
-                fg[0] = fg[1] = fg[2] = 1.0f; fg[3] = 1.0f;   /* color, never fg-tinted */
+
+                uint32_t cellbg = c->bg, cellfg = c->fg;
+                if (c->attr & ATTR_INVERSE) {
+                    uint32_t tmp = cellbg;
+                    cellbg = cellfg;
+                    cellfg = tmp;
+                }
+                float hl0 = 0, hlw = 0;
+                int hl_on = 0;
+                if (pd.sel_on) {
+                    sel_band_pixels(&pd.selspan, pd.g->cols, x, y, cw, &hl0, &hlw);
+                    hl_on = hlw > 0.0f;
+                }
+                /* The shader compares the fragment's ABSOLUTE buffer pixel x with the band edges, so the
+                   band must carry the pane's grid origin exactly like the quad origin below does. */
+                float band0 = hl_on ? pd.gx + hl0 : 0.0f;
+                float band1 = hl_on ? pd.gx + hl0 + hlw : 0.0f;
+                int is_cursor = t->show_cursor && pd.g->scroll_off == pd.g->live_off &&
+                                x == t->cx && y == t->cy;
+                uint32_t cur_col = (lay->pane[p].tab == lay->active_tab) ? CURSOR_COL : cur_off;
+                if (is_cursor) {
+                    uint32_t oldbg = cellbg;
+                    if (hl_on) {
+                        cellfg = cur_col;      /* selected cursor: tint glyph, band already drawn */
+                    } else {
+                        cellbg = cur_col;      /* unselected: glyph composites over the block */
+                        cellfg = oldbg;        /* invert ink under the block cursor */
+                    }
+                }
+                col2f(cellfg, fg);
+                col2f(cellbg, bg);
+                /* The glyph quad composites the ink over ITS OWN copy of the cell background, so that
+                   background must carry the window opacity exactly like pass 1's quad does. It used to stay
+                   at alpha 1, which is what made every glyph's bounding box opaque. */
+                bg[3] *= r->opacity;
+
+                float px = pd.gx + x * cw, py = (pd.nrows - 1 - y) * ch + pd.pad_gl;
+
+                if (cg) {
+                    /* The color bitmap carries UNSCALED strike metrics (128px strike on this box),
+                       so the scale factor is cell-height / strike-height: zooming resizes the quad
+                       without ever re-rasterizing the emoji. An emoji fills its cell box; a WIDE
+                       emoji gets the 2-cell span it reserved, so it is never squished. */
+                    float s = ch / (float)f->color_px;
+                    float gw = (float)cg->w * s, gh = (float)cg->h * s;
+                    /* The span is the WHOLE cluster's width, not just the base codepoint's: vt.c
+                       reserved 2 cells for a wide cluster, including clusters whose wide (emoji)
+                       presentation only appears once a modifier is folded in (U+2764 U+FE0F, the
+                       keycaps, a regional-indicator pair). cluster_is_wide is the same predicate
+                       vt.c used, so the quad always matches the reservation. */
+                    float span = cluster_is_wide(seq, nseq) ? 2.0f * cw : cw;
+                    if (gw > span) {
+                        float k = span / gw;
+                        gw *= k;
+                        gh *= k;
+                    }
+                    float gx = px + (span - gw) * 0.5f;   /* centered in the cell span */
+                    float gy = py + (ch - gh) * 0.5f;     /* centered in the line box */
+                    fg[0] = fg[1] = fg[2] = 1.0f; fg[3] = 1.0f;   /* color, never fg-tinted */
+                    if (c->attr & ATTR_DIM) {
+                        fg[0] = fg[1] = fg[2] = 0.5f;     /* shader scales the premul texel */
+                    }
+                    emit_quad(&vp, gx, gy, gw, gh, cg->u0, cg->v0, cg->u1, cg->v1,
+                              fg, bg, 2.0f, band0, band1);
+                    nquads++;
+                    continue;
+                }
+
+                float gw = (float)gl_->w * f->scale;
+                float gh = (float)gl_->h * f->scale;
+                float gx = px + (float)gl_->bearing_x * f->scale;
+                /* baseline: cell_top=py+ch; baseline=cell_top-ascent;
+                   glyph_top=baseline+bearing_y*scale; quad_bottom=glyph_top-gh */
+                float gy = py + ch - ascent + (float)gl_->bearing_y * f->scale - gh;
                 if (c->attr & ATTR_DIM) {
-                    fg[0] = fg[1] = fg[2] = 0.5f;     /* shader scales the premul texel */
+                    fg[0] *= 0.5f; fg[1] *= 0.5f; fg[2] *= 0.5f;
                 }
-                emit_quad(&vp, gx, gy, gw, gh, cg->u0, cg->v0, cg->u1, cg->v1,
-                          fg, bg, 2.0f, band0, band1);
+                emit_quad(&vp, gx, gy, gw, gh,
+                          gl_->u0, gl_->v0, gl_->u1, gl_->v1, fg, bg, 1.0f,
+                          band0, band1);
                 nquads++;
-                continue;
             }
+        }
+    }
 
-            float gw = (float)gl_->w * f->scale;
-            float gh = (float)gl_->h * f->scale;
-            float gx = px + (float)gl_->bearing_x * f->scale;
-            /* baseline: cell_top=py+ch; baseline=cell_top-ascent;
-               glyph_top=baseline+bearing_y*scale; quad_bottom=glyph_top-gh */
-            float gy = py + ch - ascent + (float)gl_->bearing_y * f->scale - gh;
-            if (c->attr & ATTR_DIM) {
-                fg[0] *= 0.5f; fg[1] *= 0.5f; fg[2] *= 0.5f;
+    /* The bar labels, drawn with the text font over the item backgrounds. A label never crosses its own
+       item rect, so a long tab title is cut (layout_compute already cut it to the item's columns; this
+       bound is what makes that guarantee hold even if the font is wider than the layout assumed). */
+    if (lay->bar_on) {
+        for (int i = 0; i < lay->nitem; i++) {
+            const BarItem *it = &lay->item[i];
+            col2f(it->active ? r->fg : item_off_fg, fg);
+            col2f(it->active ? item_on_bg : item_off_bg, bg);
+            bg[3] *= r->opacity;
+            float px0 = (float)it->x;
+            int col = 0;
+            for (const char *s = it->label; *s; col++) {
+                uint32_t cp = next_cp(&s);
+                if (px0 + (float)(col + 1) * cw > (float)(it->x + it->w))
+                    break;
+                Glyph *gl_ = font_glyph(f, cp);
+                if (!gl_ || gl_->w <= 0 || gl_->h <= 0)
+                    continue;
+                float gw = (float)gl_->w * f->scale;
+                float gh = (float)gl_->h * f->scale;
+                float gx = px0 + (float)col * cw + (float)gl_->bearing_x * f->scale;
+                float gy = bar_gl + ch - ascent + (float)gl_->bearing_y * f->scale - gh;
+                emit_quad(&vp, gx, gy, gw, gh, gl_->u0, gl_->v0, gl_->u1, gl_->v1,
+                          fg, bg, 1.0f, 0.0f, 0.0f);
+                nquads++;
             }
-            emit_quad(&vp, gx, gy, gw, gh,
-                      gl_->u0, gl_->v0, gl_->u1, gl_->v1, fg, bg, 1.0f,
-                      band0, band1);
-            nquads++;
+        }
+    }
+
+    /* The focus border, emitted last so nothing covers it: side-by-side mode only (with one pane it would
+       just draw a frame around the whole terminal). 2 px wide, drawn in the gap. */
+    if (lay->npane > 1) {
+        int ap = layout_pane_of_tab(lay, lay->active_tab);
+        if (ap >= 0) {
+            const PaneGeom *pg = &lay->pane[ap];
+            col2f(border_col, bg);
+            bg[3] *= r->opacity;
+            float gl_bot = (float)r->vh - (float)(pg->y + pg->h);
+            float gl_top = (float)r->vh - (float)pg->y;
+            emit_quad(&vp, (float)pg->x - 2.0f, gl_top, (float)pg->w + 4.0f, 2.0f,
+                      du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f, white, bg, 0.0f, 0.0f, 0.0f);
+            emit_quad(&vp, (float)pg->x - 2.0f, gl_bot - 2.0f, (float)pg->w + 4.0f, 2.0f,
+                      du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f, white, bg, 0.0f, 0.0f, 0.0f);
+            emit_quad(&vp, (float)pg->x - 2.0f, gl_bot, 2.0f, (float)pg->h,
+                      du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f, white, bg, 0.0f, 0.0f, 0.0f);
+            emit_quad(&vp, (float)pg->x + (float)pg->w, gl_bot, 2.0f, (float)pg->h,
+                      du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f, white, bg, 0.0f, 0.0f, 0.0f);
+            nquads += 4;
         }
     }
 
@@ -723,8 +905,9 @@ int render_draw(Render *r, Term *t, Font *f)
     }
 
     glViewport(0, 0, r->vw, r->vh);
-    /* Clear every frame: the padding margin and the whole-cell remainder are outside every quad, so
-       nothing else writes them, and after a resize the new back buffer has no defined contents. */
+    /* Clear every frame: the padding margin, the gaps between panes and the whole-cell remainders are
+       outside every quad, so nothing else writes them, and after a resize the new back buffer has no
+       defined contents. */
     set_clear_color(r);
     glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(r->prog);
@@ -760,7 +943,7 @@ int render_draw(Render *r, Term *t, Font *f)
         set_attribs_instanced(r);
         draw(GL_TRIANGLES, 0, 6, nquads);
     } else {
-        float *edata = ensure_edata(r, g->rows, g->cols);
+        float *edata = ensure_edata(r, maxq);
         expand_instances(vdata, nquads, edata);
         glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
         glBufferData(GL_ARRAY_BUFFER, (size_t)nquads * 6 * FLOATS_PER_VERT * sizeof(float),
@@ -778,14 +961,6 @@ int render_draw(Render *r, Term *t, Font *f)
         return 0;
     }
     return 1;
-}
-
-void render_set_origin(Render *r, int gx, int gy)
-{
-    /* Only legal together with the grid size it was computed for — main.c sets both in
-       term_size_changed(), before any draw. */
-    r->gx = gx < 0 ? 0 : gx;
-    r->gy = gy < 0 ? 0 : gy;
 }
 
 void render_resize(Render *r, int w, int h)

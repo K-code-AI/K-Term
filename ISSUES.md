@@ -1,35 +1,74 @@
-# K-Term — Known Issues
+# Kai-Term — Known Issues
 
 Read this before starting work. Root causes are kept short — enough to reproduce and to avoid
 re-introducing the bug. Module design is in docs/ARCHITECTURE.md.
 
+> **Renamed 2026-10-16 (session 59):** the project, binary, config file and app id are now `Kai-Term` /
+> `kai-term` (was `K-Term` / `k-term`). Everything below is written with the new names EXCEPT verbatim
+> quoted output and the entries under "Fixed", which keep the spelling they were recorded with — those
+> lines were really printed by the old binary.
+
 ## Open
 1. **Second instance crashes: `atlas glTexImage2D failed: 0x505 (512x512)` then SIGSEGV** (user report,
-   2026-10-15). Reproduce as reported: leave one `k-term` running (their words: a process left hanging in
+   2026-10-15). Reproduce as reported: leave one `kai-term` running (their words: a process left hanging in
    the background), then start another from a shell ->
    ```
    k-term error: atlas glTexImage2D failed: 0x505 (512x512)
    fish: Job 1, 'k-term' terminated by signal SIGSEGV (Address boundary error)
    ```
+   (quoted exactly as the user reported it, i.e. with the pre-rename name; the same lines now read
+   `kai-term error: …` and `'kai-term' terminated by …`.)
    With no leftover process, two launches in a row both work. `0x505` is `GL_INVALID_VALUE` from the mono
    atlas upload in `render_draw` (src/render.c), i.e. the failure happens on the FIRST frame that has
    glyphs to draw, and the segfault follows immediately. Note: `0x505` and `0x3000` lines were previously
    (session 42) dismissed as artifacts of the probe/timeout harnesses — that dismissal is now withdrawn,
    the user sees them in normal use. Not yet reproduced here; investigation in progress (session 52).
-2. **`eglSwapBuffers failed: 0x3000` on launch** (user report, 2026-10-15). Reproduce: start `k-term`
+2. **`eglSwapBuffers failed: 0x3000` on launch** (user report, 2026-10-15). Reproduce: start `kai-term`
    normally ->
    ```
    k-term error: eglSwapBuffers failed: 0x3000
    k-term warn: swap failed (1 in a row), retrying on the next frame
    ```
+   (quoted as reported, pre-rename; it now reads `kai-term error:` / `kai-term warn:`.)
    No visible effect: the 8 ms timer retries and the window draws correctly. `0x3000` is `EGL_BAD_ALLOC`.
    The frame-pacing code already handles a failed swap correctly (it keeps the frame dirty and arms no
    frame callback), so this is a spurious first-frame failure plus an error line, not a freeze — but it
    should not happen at all. Investigation in progress (session 52).
-3. **LeakSanitizer reports only third-party frames.** An ASan build of the `k-term` binary itself
+3. **LeakSanitizer reports only third-party frames.** An ASan build of the `kai-term` binary itself
    reports leaks inside libdbus-1, libwayland-client and dynamically loaded driver modules; no leak
-   frames in K-Term source. Not a K-Term bug. (There is currently no `k-term` ASan target — only the
-   tests have one; adding one is listed in AGENT.md Next Steps.)
+   frames in Kai-Term source. Not a Kai-Term bug. (There is currently no `kai-term` ASan target — only the
+   tests have one; adding one is listed in AGENT.md Next Steps. The hand-built one was re-run in session 61
+   over a full multi-session run: no AddressSanitizer error, no UBSan "runtime error", 1250 bytes leaked in
+   5 allocations, none of them from Kai-Term source.)
+4. **Fullscreen freezes the display again — INTERMITTENT** (user report, session 58, 2026-10-15; the user
+   added on 2026-10-16 that "it's intermittent and doesn't always reproduce", and asked to note it and come
+   back to it later). This is a regression of the bug fixed in sessions 45-47 (see "Fixed: Fullscreen: the
+   display stopped refreshing"), which the user had confirmed fixed in their real window on 2026-10-15.
+   Symptom as reported: entering fullscreen stops the picture updating.
+   NOT REPRODUCED HERE. It was uninvestigatable when this entry was written because `bin/kai-term` did not
+   link; since session 60 it links again, so the levers below work — but the user deferred the item, so no
+   run has been made. The intermittency fits the mechanism found in session 46:
+   the freeze needs a configure whose size change is NOT answered with a buffer of the new size, or a swap
+   that runs while a `wl_display_prepare_read()` is outstanding — whether either happens depends on what
+   else is dirty at that moment, which is timing-dependent, so "sometimes" is the expected shape.
+   A second reason to expect intermittency: the session-57/58 layout rewiring moved the draw/commit path
+   (per-pane origins, the bar, `render_draw` taking a `Layout`), so the frame-pacing rules the session-47 fix
+   depends on have to be re-checked in the new code rather than assumed to have survived. Session 61's live
+   runs (several sessions opened, closed, switched, toggled between views, plus a full ASan run of the
+   binary) showed no freeze and no `swap failed` streak, which is reassuring but is not a fullscreen test.
+   How to investigate (all proven here in sessions 46-47, no screen recording
+   needed — the user verifies anything visual themselves):
+   * `-d` and look for the pair `toplevel state: fullscreen 1 …` followed by `configure answered: buffer
+     <output size> attached (grid …)`. A fullscreen configure with NO `configure answered` line, or one that
+     reports the OLD pixel size, is the bug.
+   * A streak of `swap failed (N in a row)` means the compositor is not showing the surface.
+   * `cat /proc/<pid>/wchan` while frozen: `ep_poll` = the loop is alive (a commit/pacing problem),
+     `futex_do_wait` = blocked inside `eglSwapBuffers` (the prepared-read problem).
+   * Reproduce with the compositor's own fullscreen action driven by key injection (niri `Mod+Shift+M`),
+     several times in a row, and count how many runs freeze — with an intermittent bug a single clean run
+     proves nothing, so record the rate.
+   Deferred by the user's instruction (session 59). Do not close the "Fixed" entry above on the assumption
+   that it still holds.
 
 ## Known limitations
 Not bugs — current behaviour the user has to know about. (Root causes of actual bugs are in "Fixed".)
@@ -72,41 +111,106 @@ Not bugs — current behaviour the user has to know about. (Root causes of actua
 * **A mouse drag alone does not copy.** With the default `copy_on_release = 0` (session 43) releasing the
   drag only leaves the selection visible — the text is NOT on the clipboard, so pasting into another
   application gives whatever was there before. `Ctrl`+`Shift`+`C` (or `copy_on_release = 1`) is what puts
-  it on the system clipboard. This is the most likely cause of a "K-Term has its own clipboard" report:
-  the copy never left K-Term because it was never offered. The clipboard itself is the ordinary Wayland
+  it on the system clipboard. This is the most likely cause of a "Kai-Term has its own clipboard" report:
+  the copy never left Kai-Term because it was never offered. The clipboard itself is the ordinary Wayland
   selection (`wl_data_device`), shared with every other client — verified in both directions (see
   docs/ARCHITECTURE.md, "Clipboard is push-based").
-* **K-Term offers only `text/plain` when copying** (and asks for one mime type when pasting). Real clients
+* **Kai-Term offers only `text/plain` when copying** (and asks for one mime type when pasting). Real clients
   usually advertise `UTF8_STRING`, `text/plain;charset=utf-8`, `TEXT` and `STRING` as well; niri hands
   those over to a `text/plain` request without trouble, so this works here, but a compositor that matches
-  mime types strictly could refuse the offer. Related protocol detail: K-Term never calls
+  mime types strictly could refuse the offer. Related protocol detail: Kai-Term never calls
   `wl_data_offer_accept()` before `wl_data_offer_receive()` — niri tolerates it (measured: `wl-copy` text
-  reaches K-Term and lands in the PTY byte-for-byte), but the protocol says a receiver should accept a
+  reaches Kai-Term and lands in the PTY byte-for-byte), but the protocol says a receiver should accept a
   type first, so that is the first thing to check if pasting from another application ever breaks.
-* **The window title is always `K-Term`.** OSC 0/2 title sequences are parsed and stored
-  (`Term.title` in src/vt.c, covered by a `tests/test_vt.c` check), but `src/main.c` calls
-  `xdg_toplevel_set_title()` once with the literal `"K-Term"` and never pushes `Term.title` to the
-  compositor, so a shell or application that sets its own title has no visible effect. Nothing is broken
-  by it — it is simply not wired up.
+* **The window title is Kai-Term's own, not the application's.** The title IS pushed to the compositor
+  (`update_title()` -> `mux_title()` -> `xdg_toplevel_set_title()`): `Kai-Term` with one session,
+  `Kai-Term [active/total]` with several, plus `!N` when N sessions you are not looking at have produced
+  output. What is NOT in it is an application's OSC 0/2 title — that goes into the session's tab bar label
+  (or `shell` until the session sets one). A taskbar, a window rule or a script that matches on the window
+  title therefore sees Kai-Term's text, not the shell's.
+* **The tab bar costs one text row, and the grid wins if there is not room for both.** With `tab_bar =
+  always`, or from the second session on with the default `auto`, one cell row at the top of the window is
+  chrome. If the window is too small to hold that row, its gap and one text row, the bar is dropped for that
+  frame rather than shrinking the grid to nothing.
+* **Bar labels are cut to their item's width, with no ellipsis.** Items have equal width (the grid width
+  divided by the number of sessions), so with many sessions a label can be only a few characters. The cut
+  happens at a UTF-8 codepoint edge, never inside a multi-byte sequence, and the `*` unread mark and the
+  session number are part of the label, so a long OSC title is what gets truncated.
+* **Only `split_max` sessions are drawn in side-by-side view.** The others stay open, keep running and stay
+  listed in the bar; their output reaches you only as the `*` unread mark and the `!N` in the window title.
+  The shown group of panes slides to contain the active session, so the first and last sessions really are
+  reachable.
+* **All sessions of a window share one grid size.** A layout change — a window resize, a zoom, the
+  tab/side-by-side toggle, opening or closing a session — resizes EVERY session to the same cols x rows, so
+  every shell gets `SIGWINCH` and every session's scrollback is re-wrapped at the new width. That is exactly
+  what makes switching to a hidden session free (no resize, no re-wrap on every switch), and it is why a
+  toggle touches sessions you are not looking at.
 * **A clipboard paste larger than `PASTE_BUF_MAX` (8 MiB) is sent unwrapped** — no `ESC[200~` /
   `ESC[201~` delimiters — with a warning in the log, because the whole block has to be buffered before
   the delimiters can surround it.
 * **Transparency needs a compositor that blends ARGB surfaces.** `opacity` is verified working on niri
   (session 41, screenshot A/B); on a non-compositing or RGB-only path the window simply looks opaque.
 * **Minimum window size 200x100 px** (`xdg_toplevel_set_min_size`); a compositor may still send a
-  smaller configure and K-Term handles it (110 px high -> 6 rows), but interactive resizing stops there.
-* **Bracketed paste is per application.** K-Term sends the delimiters only when the application has
+  smaller configure and Kai-Term handles it (110 px high -> 6 rows), but interactive resizing stops there.
+* **Bracketed paste is per application.** Kai-Term sends the delimiters only when the application has
   DEC mode 2004 on; a shell/readline build with bracketed paste disabled correctly keeps getting raw
   (line-by-line) pastes.
-* **Key repeat tracks one key at a time.** A Wayland compositor never sends repeat events, so K-Term
+* **Key repeat tracks one key at a time.** A Wayland compositor never sends repeat events, so Kai-Term
   generates them itself (`repeat_delay` ms, then `repeat_rate` per second). Only the most recently
   pressed repeatable key repeats: holding `a`, then pressing and releasing `b`, stops `a`'s repeat even
   though `a` is still held. The compositor's own `wl_keyboard.repeat_info` (niri here: 25/s, 600 ms) is
   logged under `-d` but deliberately NOT used, so the timings come from the config file and are the same
-  on every compositor. `repeat_delay = 0` turns K-Term's repeat off (nothing repeats — a compositor
+  on every compositor. `repeat_delay = 0` turns Kai-Term's repeat off (nothing repeats — a compositor
   never repeats for you).
 
 ## Fixed (root cause -> fix)
+- **A click on the tab bar, or on a pane that was not the visible one, logged a switch that never
+  happened** (session 61, found by the live key/pointer-injection run that session 56 had never got; fixed
+  the same session). Symptom: the log said `bar: click selects session 2/3` and `mux: tab 1/2 visible`, but
+  the visible session did not change — and in side-by-side view every click in the LEFT pane reported
+  `cell=(0,29)`, the value the clamp produces when the grid origin still belongs to the other pane (pane 0
+  x=8, pane 1 x=630, cell 8 px: surface x=20,100,250,400,430,500 all reported column 0).
+  Root cause: `tab_switch(idx)` in src/main.c re-applied the layout and marked the frame dirty but never
+  called `mux_goto()` — only the keyboard paths ever changed the active tab, because `mux_next`/`mux_prev`/
+  `mux_goto` are called from `send_key()` and their return value was merely passed to `tab_switch()` as an
+  argument. The pointer paths passed an index that nothing consumed, and the log line printed the requested
+  index, so it claimed a switch that had not happened.
+  Fix: `tab_switch()` calls `mux_goto(&mux, idx)` itself and logs `act + 1` from what mux REPORTS, so the
+  line cannot lie; the keyboard calls become idempotent no-ops.
+  Verified LIVE (`.scratch/s61/barclick.sh`, `/tmp/s61_bar.log`): left click on bar item 2 -> `bar: click
+  selects session 2/3` + `mux: tab 2/3 visible`; a click in the left pane of a 2-pane window -> `mux: tab
+  1/2 visible` AND `sel press cell=(30,29) … cols=76`, i.e. it both focused that session and mapped through
+  its pane. `.scratch/s61/panemap.sh` (`/tmp/s61_map.log`): surface x=20/100/250/400/430/500 -> columns
+  1/11/30/49/52/61 in pane 0, x=850/880 -> columns 27/31 in pane 1. Coverage note: main.c is in no test
+  binary and no test can send a pointer button, so this rests on the live runs, not on `bin/test_vt`.
+- **`BTN_RIGHT` and `BTN_MIDDLE` were swapped** (session 61, found while testing the bar middle-click; fixed
+  the same session). `map_button()` in src/main.c labelled raw 0x111 as middle (SGR button 1) and 0x112 as
+  right (SGR 2), but the kernel defines `BTN_LEFT` 0x110, `BTN_RIGHT` 0x111, `BTN_MIDDLE` 0x112
+  (`/usr/include/linux/input-event-codes.h:357-359`) — the kernel order is NOT the protocol order.
+  Consequences: an injected middle click on a bar item produced NO `bar: middle click closes session` line at
+  all; a RIGHT click on the bar hit the `btn == 1` branch and would CLOSE a session; and middle/right were
+  swapped in SGR mouse reporting for vim/htop/etc.
+  Fix: `map_button()` deleted. The mapping is now `mouse_sgr_button(uint32_t evdev)` in src/vt.c (0 left, 1
+  middle, 2 right, 3 anything else) with an `EVDEV_BTN_*` enum in the header — in vt.c because that is where
+  the mouse-reporting state lives and because main.c is in no test binary. 6 new checks pin it, including the
+  raw literals (`EVDEV_BTN_RIGHT == 0x111 && EVDEV_BTN_MIDDLE == 0x112`) so the enum cannot be re-ordered to
+  match a wrong switch again. Negative test: the two cases swapped back -> `496 checks, 3 failures`, exactly
+  `BTN_MIDDLE -> SGR 1`, `BTN_RIGHT -> SGR 2`, `raw 0x111 is right, raw 0x112 is middle`. Verified live:
+  middle click on bar item 3 -> `bar: middle click closes session 3/3` + `mux: tab 3 closed, 2 left`.
+- **`tab_bar = always` started the window one row short of the configured `rows`** (session 62, found while
+  checking docs/ARCHITECTURE.md against the source; fixed the same session). src/main.c asked the compositor
+  for `rows*cell_h + 2*padding`, plus `cell_w + PANE_GAP` for the bar — but the bar is one cell ROW tall
+  (`out->bar_h = ch` in src/layout.c), so the addition has to use `cell_h`. With a non-square cell (8x17 on
+  this box) the window is asked for 9 px too little and `layout_compute()` hands back `rows - 1`: the one
+  case where the configured `rows` is silently not what the user gets.
+  Fix: the arithmetic moved out of main.c (which is in no test binary) into `layout_initial_size()` in
+  src/layout.c — the inverse of `layout_compute()` for the startup case — and main.c calls it.
+  Verified: 5 new checks (496 -> 501) that feed the requested size straight back through `layout_compute()` +
+  `layout_grid_size()` and require the configured 80x30 to come out again, for `BAR_ALWAYS` and `BAR_AUTO`.
+  Negative test: `*win_h += ch + g` changed back to `cw + g` -> `501 checks, 2 failures`, exactly the two
+  `BAR_ALWAYS` checks (the `BAR_AUTO` ones still pass, correctly — that path adds no bar row). NOT verified:
+  what this looks like in a real window — niri tiles the window to its own size, so the requested startup
+  height is not observable from the log here.
 - **The band around the grid was painted with `DEF_BG`, not the configured `background`** (found by the
   session-54 padding work; the user CONFIRMED it correct in their real window on 2026-10-15, and a
   lossless `wf-recorder -c ffv1` frame re-check agrees). Symptom before the fix, with `background =
@@ -168,7 +272,9 @@ Not bugs — current behaviour the user has to know about. (Root causes of actua
   16 failures, all of them the zoom checks. The headless fish harness now shows exactly ONE prompt after
   six zoom steps (was three prompts and two gaps).
 - **Fullscreen: the display stopped refreshing** (user report, `NextFeature.md` #2; sessions 45-47, the
-  user CONFIRMED the fix in their real window on 2026-10-15). Symptom was: enter fullscreen (niri
+  user CONFIRMED the fix in their real window on 2026-10-15). NOTE (session 59): the user has since reported
+  the freeze coming back, intermittently — that is tracked as Open #4, and this entry stands as the record of
+  the root cause and of the rules that fixed it, not as a claim that fullscreen is freeze-free. Symptom was: enter fullscreen (niri
   `Mod+Shift+M`) and the terminal stops updating — no typed characters and no command output appear —
   until fullscreen is exited, then everything resumes at once. The user had confirmed it was a K-Term bug,
   not a niri one.

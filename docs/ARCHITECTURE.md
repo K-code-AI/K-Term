@@ -1,4 +1,4 @@
-# K-Term — Architecture
+# Kai-Term — Architecture
 
 Module map and invariants. Kept for debugging and future development; build/usage
 details live in README.md, work history in AGENT.md, bugs in ISSUES.md.
@@ -6,50 +6,64 @@ details live in README.md, work history in AGENT.md, bugs in ISSUES.md.
 ## Data flow
 
 ```
-shell (PTY child)
-   |  bytes on pty.mfd
+shell (PTY child) — one per session
+   |  bytes on tab.pty.mfd
    v
-term_parse()            src/vt.c     UTF-8 + ESC/CSI/OSC state machine
+term_parse(&tab.term)   src/vt.c     UTF-8 + ESC/CSI/OSC state machine
    |                                   writes Cells into Term.g (Grid); folds emoji
    |                                   grapheme clusters (ZWJ/VS16/skin tone/keycap/RI pair)
    |                                   into the anchor Cell and reserves 2 cells for wide ones
    v
-Grid (rows x cols viewport + scrollback)
-   |  render_draw(r, &term, &font)
+Grid per session (rows x cols viewport + scrollback)
+   |  Mux.tab[] (src/mux.c) owns one {Term, Pty} per session; one of them is ACTIVE
    v
-Font atlas (alpha8) + color-emoji atlas (RGBA8) + per-instance quad records   src/font.c, src/render.c
+layout_compute()        src/layout.c  window px + cell px + padding + mode + the session list
+   |                                  -> the bar strip, the item rects + labels, and the pane
+   |                                     rects, each with the cols/rows that fit inside it
+   v
+render_draw(&rend, &font, &g_layout, terms)   src/render.c  bar + one grid per pane + focus border
+   |  Font atlas (alpha8) + color-emoji atlas (RGBA8) + per-instance quad records   src/font.c
    |  HarfBuzz shapes a cluster to ONE glyph id; FreeType rasterizes its color bitmap
    |  one glDrawArraysInstancedARB (or expanded glDrawArrays)
    v
 EGL surface -> wl_surface -> Wayland compositor      src/main.c (xdg-shell)
 
-keyboard / pointer (Wayland) -> kb_key / ptr_* -> pty_write()  (or selection/scrollback handling)
+keyboard / pointer (Wayland) -> kb_key / ptr_* -> pty_write() to the ACTIVE session
+   (ptr_* hit-tests the bar and the panes through g_layout first: a bar click switches or closes a
+   session, a click in another pane focuses it, only then does the cell mapping / selection run)
 ```
 
 ## Modules
 
 | File | Responsibility |
 |---|---|
-| `include/k-term/k-term.h` | All shared types (`Cell`, `Grid`, `Term`, `Parser`, `Config`, `Pty`, `Font`/`Glyph`, `Render`), prototypes, log levels, clamp/utf8 helpers. Single header; no private headers. |
-| `src/vt.c` | VT/ANSI/UTF-8 parser + grid model + selection text extraction + alternate-screen switching. No Wayland/GL dependencies — this is the unit-tested core. |
+| `include/kai-term/kai-term.h` | All shared types (`Cell`, `Grid`, `Term`, `Parser`, `Config`, `Pty`, `Font`/`Glyph`, `Render`), prototypes, log levels, clamp/utf8 helpers. Single header; no private headers. |
+| `src/vt.c` | VT/ANSI/UTF-8 parser + grid model + selection text extraction + alternate-screen switching + the evdev -> SGR mouse-button mapping (`mouse_sgr_button`) + `term_grid_geometry()`. No Wayland/GL dependencies — this is the unit-tested core. |
 | `src/pty.c` | `posix_openpt`/`grantpt`/`unlockpt`; child does `setsid` + `TIOCSCTTY` + `chdir(working dir)` + exec `$SHELL` (or `-e COMMAND`); sets `TERM`/`COLORTERM`/`TERM_PROGRAM`; `SIGWINCH`-free resize via `pty_setsize`. |
 | `src/font.c` | fontconfig pattern -> FreeType face; alpha8 glyph atlas (shelf packer + open-addressing hash by codepoint); fontconfig fallback faces for codepoints the primary font lacks; color emoji: fontconfig `FC_COLOR` face + HarfBuzz shaping of a whole cluster into one glyph id + RGBA8 color atlas (`font_color_glyph`); `font_resize()` re-rasterizes at a new pixel size (zoom). |
-| `src/render.c` | EGL (platform Wayland) + GL 2.x. Builds one shader + one VAO; per frame: clear, emit the per-cell quads in three back-to-front passes, upload the two atlases when dirty, one draw call. |
-| `src/config.c` | `key = value` config file + defaults + clamping. |
-| `src/main.c` | Wayland shell (xdg-shell), registry binding, xkb keyboard, client-side key repeat (`send_key` + `repeat_start`/`repeat_fire`/`repeat_stop`), pointer (selection, mouse reporting, scrollback wheel), selection endpoint snapping (`sel_cell` + `sel_set_endpoints`), frame-paced redraw, epoll event loop, CLI flags, clipboard data-device. |
-| `tests/test_vt.c` | Unit tests for the parser/grid/selection (incl. sub-cell band geometry and the per-glyph endpoint rule)/alt-screen/emoji-cluster/CSI 3 J/bracketed-paste/reflow/viewport-height-resize model, plus the config-file keys (364 checks). |
+| `src/render.c` | EGL (platform Wayland) + GL 2.x. Builds one shader + one VAO; per frame: clear, emit the bar + every pane's cell quads in three back-to-front passes + the focus border, upload the two atlases when dirty, one draw call. `render_draw(Render *, Font *, const Layout *, Term *const *terms)` — it draws exactly what `src/layout.c` says and owns no geometry of its own. |
+| `src/config.c` | `key = value` config file + defaults + clamping, and the key-binding spec parser (`keybind_parse`/`keymods_parse`) behind the session shortcuts. |
+| `src/mux.c` | The sessions of one window: the dense `Tab` array (`{Term, Pty, attention}`), the active index, open/close/goto/next/prev, the `max_tabs` limit, the unread-output flag and `mux_title()`. No Wayland, no EGL, no fd, no fork — that is what makes it unit-testable. |
+| `src/layout.c` | Pure geometry: window px + cell px + padding + gap + mode + the session list in; the bar strip, the item rects + labels and the pane rects (each with its cols/rows) out, plus the three hit tests and `layout_grid_size()`. main.c resizes and hit-tests through it, render.c draws exactly what it says. |
+| `src/main.c` | Wayland shell (xdg-shell), registry binding, xkb keyboard, client-side key repeat (`send_key` + `repeat_start`/`repeat_fire`/`repeat_stop`), the session shortcuts, pointer (bar clicks, pane focus, selection, mouse reporting, scrollback wheel), selection endpoint snapping (`sel_cell` + `sel_set_endpoints`), `layout_apply()` (resize every session to its layout's grid), frame-paced redraw, epoll event loop over every session's pty fd, SIGCHLD reaping by pid, CLI flags, clipboard data-device. |
+| `tests/test_vt.c` | Unit tests for the parser/grid/selection (incl. sub-cell band geometry and the per-glyph endpoint rule)/alt-screen/emoji-cluster/CSI 3 J/bracketed-paste/reflow/viewport-height-resize/mouse-button-mapping model, plus `term_grid_geometry`, the mux + key-binding API, the config-file keys and `layout_compute` (501 checks). |
 | `tests/dbg.c` | Grid-model invariant checker: asserts the `row[]` permutation + `scroll_off`/`live_off` bounds after scripted scroll, resize, reflow and zoom stages (incl. a reflow that overflows a tiny buffer). |
-| `tests/cli_test.sh` | Drives the REAL `bin/k-term` to cover `main()`'s argument parser, which no linked test binary can reach (77 checks; run by `make test-cli`, which `make test` depends on). Skips the window-opening checks when `WAYLAND_DISPLAY` is unset. |
+| `tests/cli_test.sh` | Drives the REAL `bin/kai-term` to cover `main()`'s argument parser and the config keys, which no linked test binary can reach (86 checks; run by `make test-cli`, which `make test` depends on). Skips the window-opening checks when `WAYLAND_DISPLAY` is unset. |
 | `build/generated/` | `xdg-shell-client-protocol.h` + `xdg-shell-protocol.c`, produced by `wayland-scanner` from the system `wayland-protocols` XML. Git-ignored. |
 
 ## Event loop (src/main.c)
 
-Single `epoll` loop over six descriptors:
+Single `epoll` loop over six kinds of descriptor:
 
 1. `wl_display_get_fd()` — Wayland protocol traffic.
-2. `pty.mfd` — shell output.
+2. `tab.pty.mfd` — shell output, **one per session** (a window holds up to `max_tabs` of them; each is
+   added by `tab_spawn()` when the session opens and removed by `tab_close()`). epoll reports only an fd,
+   so `tab_for_fd()` maps it back to the session it belongs to; a pty that reaches EOF closes that
+   session, it does not end the program.
 3. `timerfd` — 8 ms batching window (`FRAME_INTERVAL_NS`); coalesces bursts of output into one redraw.
-4. `signalfd(SIGCHLD)` — detects shell exit (blocked SIGCHLD so only signalfd reads it).
+4. `signalfd(SIGCHLD)` — detects shell exits (blocked SIGCHLD so only signalfd reads it). With several
+   children it reaps with `waitpid(-1, …, WNOHANG)` in a loop and matches each pid to a session
+   (`tab_for_child()`), then zeroes `pty.child` so a recycled pid is never killed twice.
 5. paste idle timerfd (`pwfd`) — one-shot, armed only while a clipboard paste is buffered; flushes it if
    the clipboard source never closes the pipe.
 6. key-repeat timerfd (`krfd`) — armed only while a key is held (see "Key repeat" below).
@@ -109,7 +123,7 @@ waiting for `dirty` alone is what left the screen frozen in fullscreen. Under `-
   mapping and SGR mouse reporting (past bug, session 31; see ISSUES.md "Fixed").
 * **Key repeat is the client's job.** A Wayland compositor never synthesizes repeat events: `wl_keyboard.key`
   delivers exactly one press and one release per physical keypress, and `wl_keyboard.repeat_info` only
-  reports the user's system-wide setting (niri here: rate 25/s, delay 600 ms). K-Term therefore generates
+  reports the user's system-wide setting (niri here: rate 25/s, delay 600 ms). Kai-Term therefore generates
   the repeats itself: `kb_key` handles a press through `send_key()`, which RETURNS whether that press is
   worth repeating — 1 for keystrokes delivered to the PTY and for Shift+PageUp/Down/Home/End scrollback
   navigation, 0 for the terminal-local one-shots (zoom, `Ctrl`+`Shift`+C/V, which would otherwise fly past
@@ -119,7 +133,7 @@ waiting for `dirty` alone is what left the screen frozen in fullscreen. Under `-
   `repeat_stop()`, which also DRAINS an expiry that already fired so a release racing the timer cannot
   deliver one extra keystroke. The timing comes from the config file rather than from `repeat_info` so the
   feel is identical on every compositor and the settings are unit-testable; `repeat_delay = 0` disables
-  K-Term's repeat entirely. Two details that are easy to get wrong: `it_interval.tv_nsec` must stay < 1e9
+  Kai-Term's repeat entirely. Two details that are easy to get wrong: `it_interval.tv_nsec` must stay < 1e9
   (`repeat_rate = 1` would otherwise hand `timerfd_settime` an invalid 1000000000 ns), and the key is
   re-TRANSLATED on every repeat (`send_key` reads the current xkb state), so pressing Shift while holding
   `a` starts producing `A`. Only the newest repeatable press repeats and only one key is tracked.
@@ -129,14 +143,14 @@ waiting for `dirty` alone is what left the screen frozen in fullscreen. Under `-
   `axis_discrete` has **no** `time` argument (unlike `axis_stop`).
 * **Clipboard is push-based, and it is the SYSTEM clipboard.** The installed `wl_data_*` API has no
   `wl_data_device_request_selection`; the compositor *pushes* the selection offer. Copy =
-  `wl_data_device.set_selection` (so the text K-Term offers is handed to every other client by the
+  `wl_data_device.set_selection` (so the text Kai-Term offers is handed to every other client by the
   compositor); paste = receive the offered `text/plain` into a pipe whose read end joins the epoll loop.
   `wl_data_source_listener.send` takes `(data, source, const char *mime, int32_t fd)`.
-  Verified end to end against a FOREIGN client, not against K-Term itself — an internal test cannot tell a
+  Verified end to end against a FOREIGN client, not against Kai-Term itself — an internal test cannot tell a
   shared clipboard from a private one, which is why every older paste test here proved less than it seemed:
-  `wl-copy 'TEXT'` + `Ctrl`+`Shift`+`V` in K-Term puts exactly those bytes in the PTY, and the user
+  `wl-copy 'TEXT'` + `Ctrl`+`Shift`+`V` in Kai-Term puts exactly those bytes in the PTY, and the user
   confirmed both directions in the real desktop (2026-10-15). Two protocol details a future change must not
-  break or "fix" blindly: K-Term offers only `text/plain` (niri also advertises `UTF8_STRING`,
+  break or "fix" blindly: Kai-Term offers only `text/plain` (niri also advertises `UTF8_STRING`,
   `text/plain;charset=utf-8`, `TEXT`, `STRING` for other clients and serves a `text/plain` request from
   them fine), and `wl_data_offer_accept()` is never called before `wl_data_offer_receive()` — niri
   tolerates that, a stricter compositor might not (ISSUES.md "Known limitations").
@@ -149,6 +163,59 @@ waiting for `dirty` alone is what left the screen frozen in fullscreen. Under `-
   buffer, and a block split across that cap would separate the paired delimiters. `paste_wrap()` (vt.c)
   is the tested reference for the exact bytes; `PASTE_START`/`PASTE_END` are the shared macros both it
   and `paste_flush()` use. A paste over `PASTE_BUF_MAX` (8 MiB) is sent unwrapped with a warning.
+
+## Multiplexing and window layout (src/mux.c + src/layout.c)
+
+**One window, several sessions.** `Mux` owns a DENSE `Tab tab[TAB_MAX]` array (`{Term, Pty, attention}`)
+plus `n` and `active`; the index is the number the user counts in the bar. `cur_term()`/`cur_pty()` in
+main.c resolve through `mux_cur()` on every call, so there is no second copy of "which session is visible"
+to keep in sync. Three rules a change must respect:
+
+* `term_init()` memsets the whole `Term` and `term_destroy()` frees both grids, so a session is
+  initialized exactly once and destroyed exactly once; `mux_close()` zeroes the vacated slot so a grid
+  pointer cannot be freed twice.
+* `term_parse()` sets `ps->t = t` on every call, but `mux_close()` shifts the later tabs down to keep the
+  array dense, so it RE-ARMS `tab[i].term.ps.t` for every moved tab. Without that a shifted session's
+  parser keeps pointing into the slot it moved out of (a check in `tests/test_vt.c` pins it).
+* `mux_close()` must capture the `Pty` BEFORE the shift, because the index it was called with no longer
+  identifies that session afterwards.
+
+**Attention.** PTY output on a session that has no pane at all sets `Tab.attention` (`mux_touch()`, which
+returns 1 only when it newly set the flag, so the title is updated once) and does NOT mark the frame dirty
+— nothing on screen changed. Output on a session that is drawn but not active marks the frame dirty and
+sets no flag: the user can see it. The flag shows up as a leading `*` in the bar label and as `!N` in
+`mux_title()`.
+
+**Layout is one pure module.** A tab bar plus side-by-side panes cannot be described by one grid origin,
+so `Render.gx/gy` and `render_set_origin()` are gone: `layout_compute()` produces a `Layout` (bar strip,
+`BarItem[]` with x/w/label/active/attention, `PaneGeom[]` with x/y/w/h/cols/rows/tab, `active_tab`) and
+both main.c and render.c read the rectangles from it. main.c's `layout_apply()` is the only caller: it
+resizes EVERY session to `layout_grid_size()` — the grid a pane of this layout has, drawn or not — which is
+what makes a tab switch cost nothing (no resize, no SIGWINCH storm, no reflow of the hidden session's
+scrollback), and it sets `W.gx/W.gy` to the origin of the pane the ACTIVE session is drawn in, which is
+what `sel_cell()`/`mouse_cell()` map the pointer through. `layout_apply()` runs from every geometry change
+AND from `redraw()`, because the bar labels and their unread marks are part of the picture; it is pure
+arithmetic over at most `TAB_MAX` sessions and resizes nothing when the sizes already match.
+
+**Pointer order matters.** `ptr_button()` checks `layout_hit_bar()` BEFORE the mouse-reporting branch, so
+an application that grabbed the mouse (`?1000`/`?1002`) still cannot eat the bar that names its tab: a left
+click on an item switches sessions, a middle click closes it, and neither reaches the PTY nor starts a
+selection. A press inside a pane that is not the active one calls `tab_switch()` first, so the cell the
+pointer then maps to is the cell drawn under it. `cur_term()` is re-checked after a middle click, because
+closing the last session makes it NULL inside a listener.
+
+**Chrome colours come from the configured palette, never from a `Term`.** `render_init()` takes the
+configured `foreground` as `Render.fg` and the bar/border colours are mixed from it and `Render.bg`
+(`mix_c()`): the active item is `SEL_BG`, an inactive one is bg + 10% fg with 45% dimmed text, the
+separator is fg 65% toward bg, and an inactive pane's cursor is `CURSOR_COL` 55% toward bg. A `Term`'s pen
+is the application's CURRENT SGR pen, so drawing the chrome from it would let an application repaint the
+bar that names its tab.
+
+**The evdev -> SGR button mapping is in vt.c, not main.c.** `mouse_sgr_button()` turns the kernel codes
+(`EVDEV_BTN_LEFT` 0x110 / `RIGHT` 0x111 / `MIDDLE` 0x112) into the protocol numbers (0 left, 1 middle, 2
+right, 3 anything else). The kernel order is NOT the protocol order, and main.c is in no test binary, so
+the mapping lives where it can be pinned by checks — a swapped pair silently made a RIGHT click on the bar
+close a session (ISSUES.md "Fixed").
 
 ## Grid model invariants (src/vt.c)
 
@@ -192,7 +259,7 @@ grid is parked in `Term.alt`; the alt grid has scrollback 0. `?1049` saves/resto
 `?47`/`?1047` switch without saving, `?1048` is cursor-only; `term_resize` resizes the parked main grid
 too.
 
-CSI 3 J ("erase saved lines", terminfo `E3`, sent by the system `clear` because K-Term sets
+CSI 3 J ("erase saved lines", terminfo `E3`, sent by the system `clear` because Kai-Term sets
 `TERM=xterm-256color`): `erase_scrollback()` drops the retained history while leaving the viewport
 untouched. It moves the viewport rows to slots `0..rows-1` (through a scratch pointer array whose count
 is validated before anything is committed, so a logic bug can never corrupt the grid), blanks every
@@ -228,7 +295,7 @@ grid is still reflowed, so the text you return to is correct.
 ## Configuration file (src/config.c)
 
 `key = value`, one per line, read once at startup from `-c FILE`, else
-`$XDG_CONFIG_HOME/k-term/k-term.conf`, else `$HOME/.config/k-term/k-term.conf`. CLI flags are applied
+`$XDG_CONFIG_HOME/kai-term/kai-term.conf`, else `$HOME/.config/kai-term/kai-term.conf`. CLI flags are applied
 AFTER the file, so they win; `-w DIR` affects only that launch and never writes the file back.
 
 * Parsing details: the value is trimmed; `#` starts a comment only at the start of a line or after a
@@ -245,7 +312,7 @@ AFTER the file, so they win; `-w DIR` affects only that launch and never writes 
 * `working_dir` is stored already tilde-expanded (`expand_tilde`, a leading `~` or `~/`); main.c then
   resolves `-w` > config > `$HOME`, `stat`s it in the parent (clean warning + `$HOME` fallback instead
   of a chdir failure inside the child) and logs `shell starts in <dir>`.
-* Defaults live in `config_default()`; the same values are the `DEF_*` macros in k-term.h, so a README
+* Defaults live in `config_default()`; the same values are the `DEF_*` macros in kai-term.h, so a README
   table and the code cannot drift apart silently — check both when changing one.
 
 ## Rendering
@@ -273,14 +340,18 @@ not tinted).
 Note: `GL_ARB_vertex_instanced` does not exist — do not gate on it (past bug: the
 instanced path never activated).
 
-### Window geometry: one helper decides the grid size AND its origin
+### Window geometry: one helper decides a grid's size AND its origin
 
 `term_grid_geometry(win_w, win_h, cell_w, cell_h, pad, &cols, &rows, &xoff, &yoff)` (src/vt.c) is the
-only place that turns a window pixel size into a grid size and a pixel origin. THREE users must agree on
-it, and that is why it is one function: `term_size_changed()` (the grid and the PTY size),
-`sel_cell()`/`mouse_cell()` (the pointer -> cell mapping) and `render_draw()` (where the quads go, via
-`render_set_origin()`). Any drift between them puts the highlight on a different glyph than the one
-under the pointer.
+only place that turns a pixel rectangle into a grid size and a pixel origin. Since session 57 it is called
+once PER PANE, from `layout_compute()`, with `pad = 0` (the window's own `Config.padding` margin and the
+`PANE_GAP` between panes are already accounted for by the pane rect, so `pane.x`/`pane.y` ARE that pane's
+grid origin). THREE users must still agree, and that is why it is one function: `layout_apply()` (the grid
+and the PTY size of every session), `sel_cell()`/`mouse_cell()` (the pointer -> cell mapping, through
+`W.gx`/`W.gy` of the active session's pane) and `render_draw()` (where the quads go, through the
+`PaneGeom` it is handed). Any drift between them puts the highlight on a different glyph than the one
+under the pointer — measured live in session 61, where a stale origin made every click in the left pane of
+a side-by-side window report column 0 (ISSUES.md "Fixed").
 
 Rules it implements, and the invariant they protect:
 
@@ -292,19 +363,22 @@ Rules it implements, and the invariant they protect:
   the **right and bottom**, never at the top/left:
 
 ```
-pad = vh - gy - rows*ch       (clamped >= 0; the configured margin PLUS the remainder)
+pad = pane.h - rows*ch        (clamped >= 0; the whole-cell remainder inside that pane)
 py  = (rows - 1 - y) * ch + pad        (GL y grows upward)
-px  = gx + x * cw
+px  = pane.x + x * cw
 ```
 
-Viewport row y therefore occupies window pixels `[gy + y*cell_h, gy + (y+1)*cell_h)` and column x
-occupies `[gx + x*cell_w, gx + (x+1)*cell_w)`, and the pointer mapping is exact:
+Viewport row y therefore occupies window pixels `[pane.y + y*cell_h, pane.y + (y+1)*cell_h)` and column x
+occupies `[pane.x + x*cell_w, pane.x + (x+1)*cell_w)`, and the pointer mapping is exact:
 `row = (ptr_y - gy) / cell_h`, `col = (ptr_x - gx) / cell_w`, clamped to the grid. A pointer in the
 margin clamps to the first row/column, one in the leftover bottom/right strip to the last. Anchor the
 grid anywhere else and every click, drag selection and SGR mouse report lands on the wrong row (past
 bug, session 30: bottom-left anchoring put the leftover strip at the top and shifted the selection by up
 to a whole row). `tests/test_vt.c` sweeps every pixel of the grid area for several window/cell/padding
 combinations and checks that the cell the input formula names is the one the renderer draws there.
+
+The selection band's edges stay ABSOLUTE buffer pixels, which is correct across panes because panes never
+overlap in x (checked in `tests/test_vt.c`) — the shader compares the fragment's absolute x.
 
 The margin is painted by `glClear`, not by a quad, so the clear colour must be the CONFIGURED
 background (`Render.bg`, premultiplied by `Config.opacity`) — `render_init` used to hardcode `DEF_BG`
@@ -417,14 +491,21 @@ packer's fit check must account for the shelf WRAP (past bug: heap-buffer-overfl
 
 ## Debugging entry points
 
-* `./bin/k-term -d` — log level 3 (font chosen, `color emoji: <path> (<n>px strike)`, GL version,
+* `./bin/kai-term -d` — log level 3 (font chosen, `color emoji: <path> (<n>px strike)`, GL version,
   instancing state, `shell starts in <dir>`, `ED 3: dropped N scrollback rows`,
   `paste: N bytes, bracketed 0|1` for every clipboard paste, `wl_pointer` interface version, clipboard
   data device, grid size + window/cell geometry
-  (`grid resized to CxR (window WxH px, cell wxh, padding P, unused ux x uy px)`), `reflow: OLD -> NEW rows at N
+  (`grid resized to CxR (window WxH px, cell wxh, padding P, unused ux x uy px, tab i/n, tab view|side-by-side view, N panes)`),
+  one `layout: tab view|side-by-side view, N pane(s), tab bar on|off, grid CxR per session` line per LAYOUT
+  SHAPE change (not per frame — it is the client-side evidence for any bar/pane report, and what
+  `tests/cli_test.sh` greps for), the session lifecycle (`mux: session 1/N started`, `mux: tab i/n opened
+  (pid P, pty fd F, grid CxR)`, `mux: tab i/n visible`, `mux: tab i closed, N left (pid P)`, `mux: the pty
+  of tab i/n closed`, `mux: the shell of tab i/n exited`, `mux: the last session is gone, exiting`) and the
+  bar clicks (`bar: click selects session i/n`, `bar: middle click closes session i/n`),
+  `reflow: OLD -> NEW rows at N
   cols (K evicted)` for every width change that needed more rows than before, `compositor repeat_info:
-  rate R/s delay D ms (k-term uses repeat_delay=… repeat_rate=… from the config)` (what the compositor
-  was configured with vs. what K-Term actually uses), `toplevel state: fullscreen F maximized M
+  rate R/s delay D ms (kai-term uses repeat_delay=… repeat_rate=… from the config)` (what the compositor
+  was configured with vs. what Kai-Term actually uses), `toplevel state: fullscreen F maximized M
   activated A (configure WxH px)` whenever the compositor changes those states (the only client-side
   evidence of entering/leaving fullscreen), `configure answered: buffer WxH attached (grid CxR)` for
   every configure whose size change was answered with a real buffer, `zoom: font Npx, grid CxR` after each
@@ -444,7 +525,7 @@ packer's fit check must account for the shelf WRAP (past bug: heap-buffer-overfl
   `~/Pictures/Screenshots/` (path comes from `screenshot-path` in `~/.config/niri/config.kdl`). Analyze
   them with PIL (`python3` + `PIL` are installed) instead of looking at the screen: locate a window by
   the colour of its background, then sample pixels. Session 41 proved transparency this way by floating
-  one k-term over another and comparing the same pixel coordinates at `-o 0.3` vs `-o 1.0`.
+  one kai-term over another and comparing the same pixel coordinates at `-o 0.3` vs `-o 1.0`.
   `grim`/`slurp` are NOT installed, wf-recorder is installed ; `niri msg --json windows` gives window ids, app_ids,
   pids and sizes but NO absolute screen position (`layout.window_size` and
   `tile_pos_in_workspace_view` are workspace-view values), so do not try to crop a screenshot to a window
@@ -453,7 +534,7 @@ packer's fit check must account for the shelf WRAP (past bug: heap-buffer-overfl
   reflow paths were verified: 300x200 -> 30x11 cells, 1800x1000 -> 180x55, and every width change logged a
   `reflow:` line, no errors). **Identify the test window as "the window id that appeared after launch"**
   (snapshot the ids, diff them): matching by title once closed the user's file manager, and `$!` after
-  `timeout ./bin/k-term &` is the timeout wrapper's pid, not k-term's, so a pid match fails too.
+  `timeout ./bin/kai-term &` is the timeout wrapper's pid, not kai-term's, so a pid match fails too.
 * A temporary `glReadPixels` readback inside `render_draw` is the other way to measure pixels (add it,
   run, then REMOVE it — it must run BEFORE `eglSwapBuffers`, because after a swap the back buffer is
   undefined and the readback proves nothing). For color emoji, gate it on the frame that actually drew

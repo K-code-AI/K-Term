@@ -1,5 +1,5 @@
-/* K-Term — Wayland frontend, event loop, main. */
-#include "k-term.h"
+/* Kai-Term — Wayland frontend, event loop, main. */
+#include "kai-term.h"
 #include "xdg-shell-client-protocol.h"
 
 #include <errno.h>
@@ -20,6 +20,27 @@
 
 #define FRAME_INTERVAL_NS 8000000   /* 8 ms redraw batching window */
 #define SCROLL_LINES_PER_DETENT 3   /* scrollback lines moved per mouse-wheel notch */
+
+/* The KB_KEY_* numbers in kai-term.h are hand-written X keysym numbers, and a binding only works if
+   they are exactly what xkb_state_key_get_one_sym() reports. Checked at compile time: a wrong number
+   would make a config binding silently dead, which no runtime test here would notice. */
+_Static_assert(KB_KEY_BackSpace == XKB_KEY_BackSpace, "KB_KEY_BackSpace must match xkbcommon");
+_Static_assert(KB_KEY_Tab == XKB_KEY_Tab, "KB_KEY_Tab must match xkbcommon");
+_Static_assert(KB_KEY_Return == XKB_KEY_Return, "KB_KEY_Return must match xkbcommon");
+_Static_assert(KB_KEY_Escape == XKB_KEY_Escape, "KB_KEY_Escape must match xkbcommon");
+_Static_assert(KB_KEY_Space == XKB_KEY_space, "KB_KEY_Space must match xkbcommon");
+_Static_assert(KB_KEY_Prior == XKB_KEY_Page_Up, "KB_KEY_Prior must match xkbcommon");
+_Static_assert(KB_KEY_Next == XKB_KEY_Page_Down, "KB_KEY_Next must match xkbcommon");
+_Static_assert(KB_KEY_Home == XKB_KEY_Home, "KB_KEY_Home must match xkbcommon");
+_Static_assert(KB_KEY_End == XKB_KEY_End, "KB_KEY_End must match xkbcommon");
+_Static_assert(KB_KEY_Insert == XKB_KEY_Insert, "KB_KEY_Insert must match xkbcommon");
+_Static_assert(KB_KEY_Delete == XKB_KEY_Delete, "KB_KEY_Delete must match xkbcommon");
+_Static_assert(KB_KEY_Left == XKB_KEY_Left, "KB_KEY_Left must match xkbcommon");
+_Static_assert(KB_KEY_Up == XKB_KEY_Up, "KB_KEY_Up must match xkbcommon");
+_Static_assert(KB_KEY_Right == XKB_KEY_Right, "KB_KEY_Right must match xkbcommon");
+_Static_assert(KB_KEY_Down == XKB_KEY_Down, "KB_KEY_Down must match xkbcommon");
+_Static_assert(KB_KEY_F1 == XKB_KEY_F1, "KB_KEY_F1 must match xkbcommon");
+_Static_assert(KB_KEY_F12 == XKB_KEY_F12, "KB_KEY_F12 must match xkbcommon");
 
 typedef struct Wayland {
     struct wl_display *display;
@@ -49,9 +70,10 @@ typedef struct Wayland {
     int comp_ver;               /* bound wl_compositor interface version */
     int pw, ph;                 /* pending configure size (px) */
     int cur_w, cur_h;           /* applied size (px) */
-    /* Where the grid starts inside the window, in px (the Config.padding margin). Set together with
-       the grid size in term_size_changed() and handed to render.c, so the quads, the selection and
-       the SGR mouse coordinates all use the same origin. */
+    /* Where the grid of the VISIBLE session starts inside the window, in px: the origin of the pane that
+       layout_apply() gave it (the Config.padding margin, plus the tab-bar row and its gap when the bar is
+       drawn). sel_cell()/mouse_cell() map the pointer through it, so a click names the cell drawn under it;
+       render.c uses the per-pane origins of g_layout directly. */
     int gx, gy;
     int first_done;
     /* The one outstanding wl_surface_frame callback, NULL when none is in flight. It replaces the old
@@ -76,13 +98,44 @@ typedef struct Wayland {
 } Wayland;
 
 static Wayland W;
-static Term term;
-static Pty pty;
+/* Multiplexing: every session this window hosts — each with its own Term (grid, scrollback,
+   selection, alt screen) and its own shell on its own PTY — plus which one is visible. The two
+   accessors below are how the rest of this file reaches "what the user is looking at": they read
+   mux.active on every call, so there is no second copy of that state that could drift out of sync.
+   They return NULL only when the last tab has just been closed; the paths that can still run then
+   (redraw, layout_apply) check for it, and everything else stops as soon as W.running does. */
+static Mux mux;
 static Font font;
 static Render rend;
 static Config conf;
 static const char *opt_cmd = NULL;   /* -e/--exec: argv storage lives until exit, so const is fine */
+static const char *g_cmd = NULL;     /* what every session runs (opt_cmd, config shell, or NULL) */
+static char g_wdir[4096];            /* resolved startup directory, reused by every new tab */
 static int base_font_size;      /* configured size, restored by Ctrl+0 */
+
+/* How this window's pixels are shared: the tab-bar strip, one rect per session, and the grid size every
+   session gets. src/layout.c computes it, render_draw() draws exactly it, and the pointer hit tests use it.
+   layout_apply() recomputes it whenever the window size, the font, the session list, the visible session or
+   the view mode changes — and once per frame, because the bar labels and their unread marks are part of the
+   picture. */
+static Layout g_layout;
+static int layout_mode = LAYOUT_TABS;   /* LAYOUT_TABS (one session fills the window) / LAYOUT_SPLIT */
+/* px between panes, and between the tab bar and the grid. Deliberately not a config key: Config.padding
+   already sets the margin around everything, and a gap of 0 would let the focus border of one pane draw
+   over its neighbour. */
+#define PANE_GAP 8
+
+static Term *cur_term(void)
+{
+    Tab *t = mux_cur(&mux);
+    return t ? &t->term : NULL;
+}
+
+static Pty *cur_pty(void)
+{
+    Tab *t = mux_cur(&mux);
+    return t ? &t->pty : NULL;
+}
 
 /* clipboard (Wayland data-device) state */
 static char *clip_text;         /* selection text offered to the clipboard (heap) */
@@ -108,8 +161,8 @@ static int g_ep = -1;                      /* main epoll fd (for adding the past
    it repeats" therefore has to generate the repeats itself. krfd is a CLOCK_MONOTONIC timer that fires
    repeat_delay ms after a repeatable press and then every 1/repeat_rate seconds; rep_key is the held
    key it re-sends (the LAST repeatable press wins, releasing it stops the repeat). The timing comes
-   from K-Term's own config rather than from repeat_info so the feel is identical on every compositor
-   and the settings are testable; repeat_delay = 0 turns K-Term's repeat off. */
+   from Kai-Term's own config rather than from repeat_info so the feel is identical on every compositor
+   and the settings are testable; repeat_delay = 0 turns Kai-Term's repeat off. */
 static int krfd = -1;
 static int rep_key = -1;        /* Wayland keycode being repeated, -1 = none */
 static uint32_t rep_serial;     /* serial of that key's press (clipboard actions need one) */
@@ -120,6 +173,7 @@ static const struct wl_callback_listener frame_listener;
 static void kb_keymap(void *d, struct wl_keyboard *k, uint32_t format, int fd, uint32_t size);
 static void selection_copy(uint32_t serial);
 static void clipboard_paste(void);
+static void update_title(void);
 
 static void wl_flush(void)
 {
@@ -158,25 +212,79 @@ static void request_frame(void)
     wl_callback_add_listener(W.frame_cb, &frame_listener, NULL);
 }
 
-static void term_size_changed(void)
+/* Recompute the layout of this window and make every session match it. This replaces
+   term_size_changed(): one grid for the whole window cannot describe a tab bar plus side-by-side panes, so
+   the geometry comes from src/layout.c and this only APPLIES it.
+   * Every session gets the grid size a pane of this layout has, drawn or not (layout_grid_size). That is
+     what keeps switching cheap: a session that was hidden comes back at the size its pane already has, so
+     no resize, no SIGWINCH storm and no reflow of its scrollback on every tab switch.
+   * W.gx/W.gy become the origin of the pane the VISIBLE session is drawn in — the origin sel_cell() and
+     mouse_cell() map the pointer through. The renderer takes the per-pane origins from g_layout itself.
+   * The bar labels and their unread marks are refreshed, which is why redraw() calls this every frame:
+     layout_compute is pure arithmetic over at most TAB_MAX sessions, and it resizes nothing when the
+     sizes already match. */
+static void layout_apply(void)
 {
-    if (!W.egl_window)
+    if (!W.egl_window || mux_count(&mux) == 0)
         return;
-    /* One call decides the grid size AND its pixel origin; sel_cell()/mouse_cell() and render.c use
-       the same origin, so a click can never land on a different cell than the one drawn there. */
-    int cols, rows, gx, gy;
-    term_grid_geometry(W.cur_w, W.cur_h, font.cell_w, font.cell_h, conf.padding,
-                       &cols, &rows, &gx, &gy);
-    W.gx = gx;
-    W.gy = gy;
-    render_set_origin(&rend, gx, gy);
-    if (cols != term.g.cols || rows != term.g.rows) {
-        term_resize(&term, rows, cols);
-        pty_setsize(&pty, rows, cols);
+
+    LayoutReq rq;
+    memset(&rq, 0, sizeof rq);
+    rq.mode = layout_mode;
+    rq.win_w = W.cur_w;
+    rq.win_h = W.cur_h;
+    rq.cell_w = font.cell_w;
+    rq.cell_h = font.cell_h;
+    rq.pad = conf.padding;
+    rq.gap = PANE_GAP;
+    rq.ntab = mux_count(&mux);
+    rq.active = mux_active(&mux);
+    rq.split_max = conf.split_max;
+    rq.bar = conf.tab_bar;
+    for (int i = 0; i < rq.ntab; i++) {
+        rq.tab[i].tab = i;
+        rq.tab[i].attention = mux.tab[i].attention;
+        rq.tab[i].title = mux.tab[i].term.title;   /* OSC 0/2; empty until the shell sets one */
+    }
+    layout_compute(&rq, &g_layout);
+
+    int cols, rows;
+    layout_grid_size(&g_layout, &cols, &rows);
+    if (cols < 1 || rows < 1)
+        return;
+
+    for (int i = 0; i < mux_count(&mux); i++) {
+        Tab *tb = &mux.tab[i];
+        if (cols == tb->term.g.cols && rows == tb->term.g.rows)
+            continue;
+        term_resize(&tb->term, rows, cols);
+        pty_setsize(&tb->pty, rows, cols);   /* SIGWINCH, so every shell redraws at its pane width */
+        const PaneGeom *pg = &g_layout.pane[0];
         klog(L_DEBUG, "grid resized to %dx%d (window %dx%d px, cell %dx%d, padding %d, "
-             "unused %d x %d px)",
+             "unused %d x %d px, tab %d/%d, %s view, %d pane%s)",
              cols, rows, W.cur_w, W.cur_h, font.cell_w, font.cell_h, conf.padding,
-             W.cur_w - 2 * gx - cols * font.cell_w, W.cur_h - 2 * gy - rows * font.cell_h);
+             pg->w - cols * font.cell_w, pg->h - rows * font.cell_h,
+             i + 1, mux_count(&mux), layout_mode == LAYOUT_SPLIT ? "side-by-side" : "tab",
+             g_layout.npane, g_layout.npane == 1 ? "" : "s");
+    }
+
+    int pi = layout_pane_of_tab(&g_layout, mux_active(&mux));
+    if (pi >= 0) {
+        W.gx = g_layout.pane[pi].x;
+        W.gy = g_layout.pane[pi].y;
+    }
+
+    /* One line per SHAPE change rather than per frame: it is the client-side evidence for every
+       "the bar or the panes look wrong" report, and it is what tests/cli_test.sh greps for. */
+    static int last_bar = -1, last_npane = -1, last_mode = -1;
+    if (last_bar != g_layout.bar_on || last_npane != g_layout.npane || last_mode != layout_mode) {
+        last_bar = g_layout.bar_on;
+        last_npane = g_layout.npane;
+        last_mode = layout_mode;
+        klog(L_INFO, "layout: %s view, %d pane%s, tab bar %s, grid %dx%d per session",
+             layout_mode == LAYOUT_SPLIT ? "side-by-side" : "tab",
+             g_layout.npane, g_layout.npane == 1 ? "" : "s", g_layout.bar_on ? "on" : "off",
+             cols, rows);
     }
 }
 
@@ -185,18 +293,18 @@ static void term_size_changed(void)
    bottom. Clamped to the grid invariant 0 <= scroll_off <= live_off, where live_off is the
    anchor that follows the newest output. Returns the movement actually applied (same sign as
    delta, 0 when clamped at an end) so callers can detect a scroll that hit a limit. */
-static int scrollback_nav(int delta)
+static int scrollback_nav(Term *t, int delta)
 {
-    int live = term.g.live_off;
+    int live = t->g.live_off;
     if (live <= 0)
         return 0;   /* nothing above the live view yet */
-    int old = term.g.scroll_off;
+    int old = t->g.scroll_off;
     int so = iclamp_(old - delta, 0, live);
     int applied = old - so;
     if (applied) {
-        term.g.scroll_off = so;
+        t->g.scroll_off = so;
         W.selecting = 0;
-        term_select_clear(&term);   /* selection is viewport-relative; drop it when scrolling */
+        term_select_clear(t);   /* selection is viewport-relative; drop it when scrolling */
         W.dirty = 1;
     }
     return applied;
@@ -212,20 +320,35 @@ static void scroll_apply(double delta_lines)
     int whole = (int)W.scroll_accum;   /* truncate toward zero */
     if (whole == 0)
         return;
-    int applied = scrollback_nav(whole);
+    int applied = scrollback_nav(cur_term(), whole);
     W.scroll_accum -= whole;
     if (applied != whole)
         W.scroll_accum = 0;   /* hit the top/bottom: drop any pending remainder */
 }
 
 /* Return the view to the live bottom (used when the user sends any key to the PTY, or when
-   new output arrives). Also drops any pending fractional scroll so it cannot linger. */
-static void snap_to_live(void)
+   new output arrives). Also drops any pending fractional scroll so it cannot linger. Per session:
+   scrolling in one tab must not move another tab's view. */
+static void snap_to_live(Term *t)
 {
     W.scroll_accum = 0;
-    if (term.g.scroll_off != term.g.live_off) {
-        term.g.scroll_off = term.g.live_off;
+    if (t->g.scroll_off != t->g.live_off) {
+        t->g.scroll_off = t->g.live_off;
         W.dirty = 1;
+    }
+}
+
+/* Give the never-written cells the configured colours. A fresh grid is entirely blank, so this also
+   initializes a new tab; zooming uses it to fill the columns a smaller font reveals. */
+static void paint_blank_cells(Term *t)
+{
+    for (int y = 0; y < t->g.rows; y++) {
+        Cell *r = grid_vprow(&t->g, y);
+        for (int x = 0; x < t->g.cols; x++)
+            if (r[x].ch == 0) {
+                r[x].bg = conf.bg;
+                r[x].fg = conf.fg;
+            }
     }
 }
 
@@ -240,26 +363,24 @@ static void zoom_apply(int newpx)
     conf.font_size = newpx;
     if (font_resize(&font, newpx) < 0)
         return;
-    term_size_changed();
-    for (int y = 0; y < term.g.rows; y++) {
-        Cell *r = grid_vprow(&term.g, y);
-        for (int x = 0; x < term.g.cols; x++)
-            if (r[x].ch == 0) {
-                r[x].bg = conf.bg;
-                r[x].fg = conf.fg;
-            }
-    }
+    layout_apply();   /* new cell px -> new pane rects -> new grid for every session */
+    for (int i = 0; i < mux_count(&mux); i++)
+        paint_blank_cells(&mux.tab[i].term);
     W.dirty = 1;
-    klog(L_DEBUG, "zoom: font %dpx, grid %dx%d", conf.font_size, term.g.cols, term.g.rows);
+    klog(L_DEBUG, "zoom: font %dpx, grid %dx%d", conf.font_size, cur_term()->g.cols,
+         cur_term()->g.rows);
 }
 
 static int swap_fail_streak;    /* consecutive failed swaps; only used to back off the log line */
 
 static void redraw(void)
 {
-    if (!W.egl_window || !rend.prog)
+    if (!W.egl_window || !rend.prog || !cur_term())
         return;
     W.dirty = 0;
+    /* The bar labels, their unread marks and the pane rects ARE the picture, so the layout is recomputed
+       here too (it resizes nothing when the grids already match). */
+    layout_apply();
     /* A frame callback can still be pending when a configure forces a new buffer: the buffer about to
        be attached supersedes it, so drop its callback and let the new commit carry its own.
        wl_callback.destroy is always legal and libwayland discards events of a destroyed object, so an
@@ -268,7 +389,12 @@ static void redraw(void)
         wl_callback_destroy(W.frame_cb);
         W.frame_cb = NULL;
     }
-    if (!render_draw(&rend, &term, &font)) {
+    /* `terms` is indexed by TAB index, exactly like PaneGeom.tab, so the renderer pairs a pane with its own
+       session and cannot be off by one on a pane index. */
+    Term *terms[TAB_MAX];
+    for (int i = 0; i < mux_count(&mux); i++)
+        terms[i] = &mux.tab[i].term;
+    if (!render_draw(&rend, &font, &g_layout, terms)) {
         /* NO buffer was attached, so nothing may be armed on the commit that follows: the done of a
            commit without a buffer can stay pending forever, and every draw path here is gated on "no
            callback in flight" (that is exactly how the fullscreen freeze worked). Keep the frame dirty
@@ -281,7 +407,7 @@ static void redraw(void)
     swap_fail_streak = 0;
     if (W.resized)
         klog(L_DEBUG, "configure answered: buffer %dx%d attached (grid %dx%d)", W.cur_w, W.cur_h,
-             term.g.cols, term.g.rows);
+             cur_term()->g.cols, cur_term()->g.rows);
     W.resized = 0;                    /* the buffer just attached has the configured size */
     W.swapped_once = 1;
     request_frame();                  /* arm BEFORE the commit: it belongs to this frame */
@@ -301,7 +427,7 @@ static int apply_pending_resize(void)
     W.cur_h = W.ph;
     wl_egl_window_resize(W.egl_window, W.cur_w, W.cur_h, 0, 0);
     render_resize(&rend, W.cur_w, W.cur_h);
-    term_size_changed();
+    layout_apply();
     W.dirty = 1;
     W.resized = 1;      /* cleared by redraw() once a buffer of THIS size has been attached */
     /* Do NOT arm a frame callback here, and do not swap here: a wl_frame callback is only delivered
@@ -309,6 +435,176 @@ static int apply_pending_resize(void)
        blocks every draw path (the startup deadlock, and the fullscreen freeze). The frame path
        (timerfd / frame_done) is what answers the configure with a buffer of the new size. */
     return 1;
+}
+
+/* ---------------- multiplexing: the sessions of this window ---------------- */
+
+/* The tab state, in the window title. There is no tab bar (the renderer draws cells, not chrome), so
+   the title is the only place a user can see which session they are looking at, how many there are,
+   and whether a hidden one has output they have not looked at yet. With one session the title stays
+   exactly what it was before multiplexing existed. */
+static void update_title(void)
+{
+    if (!W.toplevel)
+        return;
+    char ttl[128];
+    mux_title(&mux, ttl, sizeof ttl);
+    xdg_toplevel_set_title(W.toplevel, ttl);
+}
+
+/* Fold the ASCII letters to lowercase: a binding names the KEY, and the Shift state is a modifier of
+   its own, so "Ctrl+Shift+T" is written with a T but the press arrives as 'T' with Shift already in
+   the modifier mask. config.c folds the spec the same way. */
+static xkb_keysym_t norm_sym(xkb_keysym_t s)
+{
+    if (s >= XKB_KEY_A && s <= XKB_KEY_Z)
+        return s - XKB_KEY_A + XKB_KEY_a;
+    return s;
+}
+
+/* Does this press match a binding? The modifier set must match EXACTLY (reduced to the four KB_*
+   bits), so Ctrl+Shift+T does not fire for Ctrl+Alt+Shift+T, and Caps/Num lock never count. */
+static int bind_match(const KeyBind *kb, xkb_keysym_t sym, unsigned mods)
+{
+    if (!kb->set || kb->mods != mods)
+        return 0;
+    return kb->sym == norm_sym(sym);
+}
+
+/* Which session owns this pty master fd? epoll reports only the fd. Linear scan: at most max_tabs
+   entries (TAB_MAX is 64), and this runs once per readable fd, not per byte read. */
+static int tab_for_fd(int fd)
+{
+    if (fd < 0)
+        return -1;
+    for (int i = 0; i < mux_count(&mux); i++)
+        if (mux.tab[i].pty.mfd == fd)
+            return i;
+    return -1;
+}
+
+static int tab_for_child(pid_t pid)
+{
+    if (pid <= 0)
+        return -1;
+    for (int i = 0; i < mux_count(&mux); i++)
+        if (mux.tab[i].pty.child == pid)
+            return i;
+    return -1;
+}
+
+/* Start a session's shell and put its master in epoll. Shared by the first tab (spawned during
+   startup) and every later one (key_new_tab). */
+static int tab_spawn(Tab *tb)
+{
+    if (pty_spawn(&tb->pty, g_cmd, tb->term.g.rows, tb->term.g.cols, g_wdir) < 0)
+        return -1;
+    struct epoll_event ev = { .events = EPOLLIN, .data.fd = tb->pty.mfd };
+    if (g_ep >= 0 && epoll_ctl(g_ep, EPOLL_CTL_ADD, tb->pty.mfd, &ev) != 0) {
+        klog(L_WARN, "mux: cannot watch the new tab's pty: %s", strerror(errno));
+        close(tb->pty.mfd);
+        tb->pty.mfd = -1;
+        if (tb->pty.child > 0)
+            kill(tb->pty.child, SIGHUP);
+        tb->pty.child = 0;   /* the SIGCHLD path reaps it; do not kill a recycled pid */
+        return -1;
+    }
+    return 0;
+}
+
+/* Open another session in this window: the same command and startup directory as the first, and the grid
+   size this layout gives every session (layout_grid_size), so the new pane needs no resize. */
+static void tab_open(void)
+{
+    int cols, rows;
+    layout_grid_size(&g_layout, &cols, &rows);
+    if (cols < 1 || rows < 1) {          /* no layout yet (startup): fall back to the configured grid */
+        Tab *ref = mux_cur(&mux);
+        cols = ref ? ref->term.g.cols : conf.cols;
+        rows = ref ? ref->term.g.rows : conf.rows;
+    }
+    int idx = mux_open(&mux, rows, cols, conf.scrollback);
+    if (idx < 0)
+        return;                       /* mux_open already logged the max_tabs refusal */
+    Tab *tb = &mux.tab[idx];
+    tb->term.pen.fg = conf.fg;
+    tb->term.pen.bg = conf.bg;
+    paint_blank_cells(&tb->term);
+    layout_apply();                   /* the bar gains an item, and every session gets its pane's grid */
+    if (tab_spawn(tb) < 0) {
+        mux_close(&mux, idx);
+        layout_apply();
+        update_title();
+        W.dirty = 1;
+        return;
+    }
+    klog(L_INFO, "mux: tab %d/%d opened (pid %d, pty fd %d, grid %dx%d)",
+         idx + 1, mux_count(&mux), (int)tb->pty.child, tb->pty.mfd, tb->term.g.cols,
+         tb->term.g.rows);
+    update_title();
+    W.dirty = 1;
+}
+
+/* Close one session. The Pty is captured BEFORE mux_close(): the tab after it slides into this slot,
+   and the one being closed owns the descriptor. Closing the master hangs up the shell; the explicit
+   SIGHUP covers a shell that somehow survives that, and the SIGCHLD path reaps the child. */
+static void tab_close(int idx)
+{
+    if (idx < 0 || idx >= mux_count(&mux))
+        return;
+    Pty p = mux.tab[idx].pty;
+    if (g_ep >= 0 && p.mfd >= 0)
+        epoll_ctl(g_ep, EPOLL_CTL_DEL, p.mfd, NULL);
+    if (p.mfd >= 0)
+        close(p.mfd);
+    if (p.child > 0)
+        kill(p.child, SIGHUP);
+    int act = mux_close(&mux, idx);
+    klog(L_INFO, "mux: tab %d closed, %d left (pid %d)", idx + 1, mux_count(&mux), (int)p.child);
+    if (act < 0) {
+        klog(L_INFO, "mux: the last session is gone, exiting");
+        W.running = 0;
+        return;
+    }
+    layout_apply();      /* one bar item fewer, and the remaining panes get the whole width back */
+    update_title();
+    W.dirty = 1;
+}
+
+/* Show another session. Only what is drawn and what the keyboard talks to changes: every shell keeps
+   running, and each tab keeps its own grid, scroll position, selection and alt screen. */
+static void tab_switch(int idx)
+{
+    if (idx < 0 || idx >= mux_count(&mux))
+        return;
+    /* mux_goto() IS the switch. The active index is the only state that says which session the keyboard
+       talks to, which pane the focus border is drawn around and which pane's origin the pointer is mapped
+       through — so a function called "switch" that only re-applies the layout switches nothing. Session 61
+       found exactly that: the keyboard paths appeared to work because mux_next/mux_prev/mux_goto had already
+       moved the index before calling here (their return value was passed as `idx` and never used), while the
+       pointer paths — a click on a bar item, a click in another pane — logged a switch and changed nothing,
+       leaving the pointer mapped through the previous session's pane (every click in the left pane of a
+       side-by-side window reported cell column 0, the clamp). The log line now prints what mux actually
+       holds, so it cannot report a switch that did not happen. */
+    int act = mux_goto(&mux, idx);
+    W.selecting = 0;      /* a drag belongs to the tab it started in */
+    klog(L_INFO, "mux: tab %d/%d visible", act + 1, mux_count(&mux));
+    /* Which session is visible is part of the LAYOUT: it is the item the bar highlights, the pane the
+       focus border is drawn around, the session the pane window slides to in split view, and the one whose
+       pane origin the pointer is mapped through (W.gx/W.gy). */
+    layout_apply();
+    update_title();
+    W.dirty = 1;
+}
+
+/* Flip between "one session fills the window" (tab view) and "the sessions sit side by side" (split view).
+   Nothing else changes — the same sessions, shells, scrollback and selection; only which of them are drawn
+   and how wide each pane is. layout_apply() logs the new shape, which is the evidence a live run leaves. */
+static void layout_toggle(void)
+{
+    layout_mode = (layout_mode == LAYOUT_SPLIT) ? LAYOUT_TABS : LAYOUT_SPLIT;
+    layout_apply();
+    W.dirty = 1;
 }
 
 /* ---------------- wayland listeners ---------------- */
@@ -412,7 +708,7 @@ static const struct xdg_toplevel_listener toplevel_listener = {
 
 static void send_str(const char *s, size_t n)
 {
-    pty_write(&pty, s, n);
+    pty_write(cur_pty(), s, n);
 }
 
 /* Translate one key press and act on it. Returns 1 when the press is something the user expects to
@@ -430,13 +726,54 @@ static int send_key(uint32_t key, uint32_t serial)
     xkb_mod_mask_t shift = xkb_keymap_mod_get_mask(W.keymap, "Shift");
     int shift_held = shift && (eff & shift);
 
+    /* Multiplexing. Matched FIRST, before the built-in Ctrl+Shift+C/V: the tab actions are the ones
+       the user can rebind, so if a chord is shared it is the configured binding that wins (the
+       copy/paste action can be moved by rebinding the tab one). Every one of them returns 0, so a
+       held key never opens, closes or switches tab after tab — see the repeat comment at the top of
+       the file. The bindings come from the config file (key_new_tab, key_close_tab, key_next_tab,
+       key_prev_tab, key_toggle_layout, key_tab_prefix). */
+    unsigned kbmods = 0;
+    if (ctrl && (eff & ctrl))
+        kbmods |= KB_CTRL;
+    if (shift && (eff & shift))
+        kbmods |= KB_SHIFT;
+    xkb_mod_mask_t alt = xkb_keymap_mod_get_mask(W.keymap, "Alt");
+    xkb_mod_mask_t superm = xkb_keymap_mod_get_mask(W.keymap, "Super");
+    if (alt && (eff & alt))
+        kbmods |= KB_ALT;
+    if (superm && (eff & superm))
+        kbmods |= KB_SUPER;
+    if (bind_match(&conf.key_new_tab, base, kbmods)) { tab_open(); return 0; }
+    if (bind_match(&conf.key_close_tab, base, kbmods)) { tab_close(mux_active(&mux)); return 0; }
+    if (bind_match(&conf.key_next_tab, base, kbmods)) { tab_switch(mux_next(&mux)); return 0; }
+    if (bind_match(&conf.key_prev_tab, base, kbmods)) { tab_switch(mux_prev(&mux)); return 0; }
+    if (bind_match(&conf.key_toggle_layout, base, kbmods)) { layout_toggle(); return 0; }
+    /* key_tab_prefix + a digit jumps straight to that tab (1-based, like every other terminal).
+       Digits are the one case the KeyBind fields cannot express, so this shortcut is driven by the
+       modifier list alone. The digit is taken from the key's LEVEL-0 keysym, NOT from `base`: on a US
+       layout the DEFAULT prefix Ctrl+Shift turns 1 into "!", 2 into "@", ... so matching `base` made the
+       shortcut dead in the default configuration (measured live, session 60: Ctrl+Shift+1 produced no
+       `mux: tab N/M visible` line at all). Shift is already part of the modifier mask the prefix is
+       compared against, so reading level 0 costs nothing and keeps `key_tab_prefix = Alt` working too. */
+    if (conf.tab_prefix_mods && kbmods == conf.tab_prefix_mods) {
+        xkb_layout_index_t grp = xkb_state_serialize_layout(W.xkb_state, XKB_STATE_LAYOUT_EFFECTIVE);
+        const xkb_keysym_t *lev = NULL;
+        int nlev = xkb_keymap_key_get_syms_by_level(W.keymap, kc, grp, 0, &lev);
+        xkb_keysym_t dig = (nlev > 0 && lev) ? lev[0] : base;
+        if (dig >= XKB_KEY_1 && dig <= XKB_KEY_9) {
+            tab_switch(mux_goto(&mux, (int)(dig - XKB_KEY_1)));   /* mux_goto clamps to the tabs that exist */
+            return 0;
+        }
+    }
+
     /* Shift+PageUp/Down/Home/End navigate scrollback instead of sending escape codes. */
     if (shift_held) {
+        Term *t = cur_term();
         switch (base) {
-        case XKB_KEY_Page_Up:   scrollback_nav(term.g.rows); return 1;
-        case XKB_KEY_Page_Down: scrollback_nav(-term.g.rows); return 1;
-        case XKB_KEY_Home:      scrollback_nav(term.g.rcap); return 1;
-        case XKB_KEY_End:       scrollback_nav(-term.g.rcap); return 1;
+        case XKB_KEY_Page_Up:   scrollback_nav(t, t->g.rows); return 1;
+        case XKB_KEY_Page_Down: scrollback_nav(t, -t->g.rows); return 1;
+        case XKB_KEY_Home:      scrollback_nav(t, t->g.rcap); return 1;
+        case XKB_KEY_End:       scrollback_nav(t, -t->g.rcap); return 1;
         default: break;
         }
     }
@@ -449,7 +786,7 @@ static int send_key(uint32_t key, uint32_t serial)
         if (base == XKB_KEY_V) { clipboard_paste(); return 0; }
     }
     /* any other key sent to the PTY returns the view to the live bottom */
-    snap_to_live();
+    snap_to_live(cur_term());
 
     if (ctrl && (eff & ctrl)) {
         /* Ctrl+letter / Ctrl+common punctuation -> control codes */
@@ -580,7 +917,7 @@ static void kb_key(void *d, struct wl_keyboard *k, uint32_t serial, uint32_t tim
         return;
     }
     /* Released the key that was repeating: stop. Releasing some OTHER key leaves the repeat alone.
-       K-Term tracks a single key, so releasing the newest key also ends the repeat of an older key
+       Kai-Term tracks a single key, so releasing the newest key also ends the repeat of an older key
        that is still held — a deliberate simplification (see the krfd block at the top of the file). */
     if (state_wl == WL_KEYBOARD_KEY_STATE_RELEASED && rep_key == (int)key)
         repeat_stop();
@@ -588,22 +925,16 @@ static void kb_key(void *d, struct wl_keyboard *k, uint32_t serial, uint32_t tim
 
 /* ---- mouse reporting helpers (DEC ?1000/?1002/?1006) ---- */
 
-static int map_button(uint32_t b)
-{
-    switch (b) {
-    case 0x110: return 0;   /* BTN_LEFT   -> SGR 0 */
-    case 0x111: return 1;   /* BTN_MIDDLE -> SGR 1 */
-    case 0x112: return 2;   /* BTN_RIGHT  -> SGR 2 */
-    default:    return 3;   /* side/extra -> SGR 3 */
-    }
-}
+/* The evdev BTN_* -> SGR button-number mapping lives in vt.c (mouse_sgr_button) because that is where
+   the mouse-reporting state is and because main.c is linked into no test binary. Session 61 found the
+   local version of it had BTN_RIGHT and BTN_MIDDLE swapped. */
 
 static void mouse_cell(int *col, int *row)
 {
     int cw = font.cell_w > 0 ? font.cell_w : 1;
     int ch = font.cell_h > 0 ? font.cell_h : 1;
-    *col = iclamp_((W.ptr_x - W.gx) / cw, 0, term.g.cols - 1) + 1;   /* 1-based */
-    *row = iclamp_((W.ptr_y - W.gy) / ch, 0, term.g.rows - 1) + 1;
+    *col = iclamp_((W.ptr_x - W.gx) / cw, 0, cur_term()->g.cols - 1) + 1;   /* 1-based */
+    *row = iclamp_((W.ptr_y - W.gy) / ch, 0, cur_term()->g.rows - 1) + 1;
 }
 
 /* 0-based viewport cell under the pointer.
@@ -618,8 +949,8 @@ static void sel_cell(int *col, int *row)
 {
     int cw = font.cell_w > 0 ? font.cell_w : 1;
     int ch = font.cell_h > 0 ? font.cell_h : 1;
-    *col = iclamp_((W.ptr_x - W.gx) / cw, 0, term.g.cols - 1);
-    *row = iclamp_((W.ptr_y - W.gy) / ch, 0, term.g.rows - 1);
+    *col = iclamp_((W.ptr_x - W.gx) / cw, 0, cur_term()->g.cols - 1);
+    *row = iclamp_((W.ptr_y - W.gy) / ch, 0, cur_term()->g.rows - 1);
 }
 
 /* Set both selection endpoints: the anchor cell and the cell the pointer is on now.
@@ -632,12 +963,12 @@ static void sel_cell(int *col, int *row)
 static void sel_set_endpoints(int ax, int ay, int bx, int by)
 {
     int forward = (by > ay) || (by == ay && bx >= ax);
-    term.sel_ax = ax;
-    term.sel_ay = ay;
-    term.sel_bx = bx;
-    term.sel_by = by;
-    term.sel_af = forward ? 0 : 1000;
-    term.sel_bf = forward ? 1000 : 0;
+    cur_term()->sel_ax = ax;
+    cur_term()->sel_ay = ay;
+    cur_term()->sel_bx = bx;
+    cur_term()->sel_by = by;
+    cur_term()->sel_af = forward ? 0 : 1000;
+    cur_term()->sel_bf = forward ? 1000 : 0;
 }
 
 /* code: SGR button number (0..3), or +32 for a motion event. action: 'M' press/motion,
@@ -647,12 +978,12 @@ static void mouse_send(int code, int col, int row, char action)
 {
     char seq[40];
     int n;
-    if (term.mouse_mode & MOUSE_SGR)
+    if (cur_term()->mouse_mode & MOUSE_SGR)
         n = snprintf(seq, sizeof(seq), "\x1b[<%d;%d;%d%c", code, col, row, action);
     else
         n = snprintf(seq, sizeof(seq), "\x1b[M%c%c%c", 32 + code, 32 + col, 32 + row);
     if (n > 0)
-        pty_write(&pty, seq, (size_t)n);
+        pty_write(cur_pty(), seq, (size_t)n);
 }
 
 static void ptr_enter(void *d, struct wl_pointer *p, uint32_t serial,
@@ -708,21 +1039,21 @@ static void ptr_motion(void *d, struct wl_pointer *p, uint32_t time, wl_fixed_t 
     if (W.selecting) {
         int col, row;
         sel_cell(&col, &row);
-        int before = (row < term.sel_ay) || (row == term.sel_ay && col < term.sel_ax);
+        int before = (row < cur_term()->sel_ay) || (row == cur_term()->sel_ay && col < cur_term()->sel_ax);
         int af = before ? 1000 : 0, bf = before ? 0 : 1000;
-        if (col != term.sel_bx || row != term.sel_by || af != term.sel_af || bf != term.sel_bf) {
-            sel_set_endpoints(term.sel_ax, term.sel_ay, col, row);
+        if (col != cur_term()->sel_bx || row != cur_term()->sel_by || af != cur_term()->sel_af || bf != cur_term()->sel_bf) {
+            sel_set_endpoints(cur_term()->sel_ax, cur_term()->sel_ay, col, row);
             W.dirty = 1;
             klog(L_DEBUG, "sel drag cell=(%d,%d) frac=%d ptr=(%d,%d) cw=%d ch=%d rows=%d cols=%d",
-                 col, row, term.sel_bf, W.ptr_x, W.ptr_y, font.cell_w, font.cell_h,
-                 term.g.rows, term.g.cols);
+                 col, row, cur_term()->sel_bf, W.ptr_x, W.ptr_y, font.cell_w, font.cell_h,
+                 cur_term()->g.rows, cur_term()->g.cols);
         }
         return;
     }
     /* wl_pointer.motion is opcode 2 and libwayland aborts if a bound interface's listener
        leaves an event slot NULL. When ?1002 drag tracking is on and a button is held, emit
        a motion report at the pointer's cell. */
-    if ((term.mouse_mode & MOUSE_DRAG) && W.ptr_btn >= 0) {
+    if ((cur_term()->mouse_mode & MOUSE_DRAG) && W.ptr_btn >= 0) {
         int col, row;
         mouse_cell(&col, &row);
         mouse_send(W.ptr_btn + 32, col, row, 'M');
@@ -733,10 +1064,39 @@ static void ptr_button(void *d, struct wl_pointer *p, uint32_t serial, uint32_t 
                        uint32_t button, uint32_t state)
 {
     (void)d; (void)p; (void)time;
-    int btn = map_button(button);
+    int btn = mouse_sgr_button(button);   /* 0 left, 1 middle, 2 right, 3 other (vt.c) */
     int pressed = state == WL_POINTER_BUTTON_STATE_PRESSED;
 
-    if (term.mouse_mode & (MOUSE_PRESS | MOUSE_DRAG)) {
+    /* The tab bar is chrome, not terminal. A left click on an item shows that session, a middle click
+       closes it, and neither reaches the application nor starts a text selection. This is checked BEFORE the
+       mouse-reporting branch on purpose: an application that grabbed the mouse (?1000/?1002) still must not
+       be able to eat the bar that names its tab. */
+    int bi = layout_hit_bar(&g_layout, W.ptr_x, W.ptr_y);
+    if (bi >= 0 && pressed) {
+        int tab = g_layout.item[bi].tab;
+        W.selecting = 0;
+        if (btn == 1) {                     /* BTN_MIDDLE closes the session it was clicked on */
+            klog(L_INFO, "bar: middle click closes session %d/%d", tab + 1, mux_count(&mux));
+            tab_close(tab);
+        } else if (btn == 0 && tab != mux_active(&mux)) {
+            klog(L_DEBUG, "bar: click selects session %d/%d", tab + 1, mux_count(&mux));
+            tab_switch(tab);
+        }
+        if (!cur_term())
+            return;                         /* the middle click closed the last session: the app exits */
+        W.dirty = 1;
+        return;
+    }
+
+    /* A click inside a pane that is NOT the visible session focuses that session first, so the cell the
+       pointer maps to is the cell drawn under it (W.gx/W.gy follow the visible session's pane). */
+    if (pressed) {
+        int pi = layout_hit_pane(&g_layout, W.ptr_x, W.ptr_y);
+        if (pi >= 0 && g_layout.pane[pi].tab != mux_active(&mux))
+            tab_switch(g_layout.pane[pi].tab);
+    }
+
+    if (cur_term()->mouse_mode & (MOUSE_PRESS | MOUSE_DRAG)) {
         /* an application grabbed the mouse: report the button to the PTY */
         W.ptr_btn = pressed ? btn : -1;
         int col, row;
@@ -750,12 +1110,12 @@ static void ptr_button(void *d, struct wl_pointer *p, uint32_t serial, uint32_t 
         int col, row;
         sel_cell(&col, &row);
         if (pressed) {
-            term.sel_active = 1;
+            cur_term()->sel_active = 1;
             sel_set_endpoints(col, row, col, row);   /* one whole cell under the pointer */
             W.selecting = 1;
             klog(L_DEBUG, "sel press cell=(%d,%d) frac=%d ptr=(%d,%d) cw=%d ch=%d rows=%d cols=%d",
-                 col, row, term.sel_bf, W.ptr_x, W.ptr_y, font.cell_w, font.cell_h,
-                 term.g.rows, term.g.cols);
+                 col, row, cur_term()->sel_bf, W.ptr_x, W.ptr_y, font.cell_w, font.cell_h,
+                 cur_term()->g.rows, cur_term()->g.cols);
         } else {
             W.selecting = 0;
             /* Releasing the drag used to ALWAYS offer the selection to the
@@ -764,10 +1124,10 @@ static void ptr_button(void *d, struct wl_pointer *p, uint32_t serial, uint32_t 
                Ctrl+Shift+C is what copies it. */
             if (conf.copy_on_release) {
                 selection_copy(serial);   /* finalize: offer the selection to the clipboard */
-            } else if (term.sel_active) {
+            } else if (cur_term()->sel_active) {
                 klog(L_DEBUG, "selection finished: %d,%d -> %d,%d (copy_on_release off — "
                               "Ctrl+Shift+C to copy)",
-                     term.sel_ax, term.sel_ay, term.sel_bx, term.sel_by);
+                     cur_term()->sel_ax, cur_term()->sel_ay, cur_term()->sel_bx, cur_term()->sel_by);
             }
         }
         W.dirty = 1;
@@ -781,7 +1141,7 @@ static void ptr_axis(void *d, struct wl_pointer *p, uint32_t time, uint32_t axis
     if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL)
         return;
     double v = wl_fixed_to_double(value);
-    if (term.mouse_mode & (MOUSE_PRESS | MOUSE_DRAG)) {
+    if (cur_term()->mouse_mode & (MOUSE_PRESS | MOUSE_DRAG)) {
         /* an application grabbed the mouse: report the wheel as SGR button 4 (up) / 5 (down) */
         int col, row;
         mouse_cell(&col, &row);
@@ -810,7 +1170,7 @@ static void ptr_axis_discrete(void *d, struct wl_pointer *p, uint32_t axis, int3
     (void)d; (void)p;
     if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL)
         return;
-    if (term.mouse_mode & (MOUSE_PRESS | MOUSE_DRAG))
+    if (cur_term()->mouse_mode & (MOUSE_PRESS | MOUSE_DRAG))
         return;   /* app-grabbed wheel is already reported via ptr_axis */
     W.frame_discrete += discrete;
     W.frame_discrete_seen = 1;
@@ -822,7 +1182,7 @@ static void ptr_axis_discrete(void *d, struct wl_pointer *p, uint32_t axis, int3
 static void ptr_scroll_done(void *d, struct wl_pointer *p)
 {
     (void)d; (void)p;
-    if (!(term.mouse_mode & (MOUSE_PRESS | MOUSE_DRAG))) {
+    if (!(cur_term()->mouse_mode & (MOUSE_PRESS | MOUSE_DRAG))) {
         double delta_lines = 0.0;   /* + = scroll up (into history) */
         if (W.frame_discrete_seen)
             delta_lines = -(double)W.frame_discrete * SCROLL_LINES_PER_DETENT;
@@ -1000,10 +1360,10 @@ static void maybe_create_data_device(void)
 /* Copy the current selection to the clipboard as a text/plain data source. */
 static void selection_copy(uint32_t serial)
 {
-    if (!W.data_dev || !term.sel_active)
+    if (!W.data_dev || !cur_term()->sel_active)
         return;
     char buf[16400];
-    int n = term_selection_text(&term, buf, sizeof(buf));
+    int n = term_selection_text(cur_term(), buf, sizeof(buf));
     if (n <= 0)
         return;
     free(clip_text);
@@ -1040,18 +1400,18 @@ static void paste_flush(void)
 {
     if (!paste_len)
         return;
-    int bracketed = term.bracketed_paste && !paste_overflow;
+    int bracketed = cur_term()->bracketed_paste && !paste_overflow;
     static const char start[] = PASTE_START, end[] = PASTE_END;
     if (bracketed)
-        pty_write(&pty, start, sizeof(start) - 1);
+        pty_write(cur_pty(), start, sizeof(start) - 1);
     size_t off = 0;
     while (off < paste_len) {
         size_t chunk = imin_(paste_len - off, (size_t)4096);
-        pty_write(&pty, paste_buf + off, chunk);
+        pty_write(cur_pty(), paste_buf + off, chunk);
         off += chunk;
     }
     if (bracketed)
-        pty_write(&pty, end, sizeof(end) - 1);
+        pty_write(cur_pty(), end, sizeof(end) - 1);
     klog(L_DEBUG, "paste: %zu bytes, bracketed %d%s", paste_len, bracketed,
          paste_overflow ? " (overflow: sent raw)" : "");
     paste_len = 0;
@@ -1082,10 +1442,10 @@ static void kb_mod(void *d, struct wl_keyboard *k, uint32_t serial, uint32_t mod
 static void kb_repeat(void *d, struct wl_keyboard *k, int rate, int delay)
 {
     (void)d; (void)k;
-    /* Informational only. K-Term drives its own repeat from repeat_delay/repeat_rate in the config
+    /* Informational only. Kai-Term drives its own repeat from repeat_delay/repeat_rate in the config
        file, so the feel does not depend on what the compositor happens to be configured with; the
        values are logged so the user can match their system settings. */
-    klog(L_DEBUG, "compositor repeat_info: rate %d/s delay %d ms (k-term uses repeat_delay=%d ms, "
+    klog(L_DEBUG, "compositor repeat_info: rate %d/s delay %d ms (kai-term uses repeat_delay=%d ms, "
          "repeat_rate=%d/s from the config)", rate, delay, conf.repeat_delay, conf.repeat_rate);
 }
 
@@ -1210,11 +1570,11 @@ static int wayland_setup(int init_w, int init_h)
     xdg_toplevel_add_listener(W.toplevel, &toplevel_listener, NULL);
     /* app_id is what the compositor matches windows on (niri/Sway rules, taskbar grouping, file
        managers' "open terminal here"). Configurable through the config file; config_default() puts
-       DEF_APP_ID ("K-Term") there and an empty value is refilled there too, so the
+       DEF_APP_ID ("Kai-Term") there and an empty value is refilled there too, so the
        fallback here only covers a Config that never went through config_default. */
     xdg_toplevel_set_app_id(W.toplevel, conf.app_id[0] ? conf.app_id : DEF_APP_ID);
     klog(L_INFO, "app_id: %s", conf.app_id[0] ? conf.app_id : DEF_APP_ID);
-    xdg_toplevel_set_title(W.toplevel, "K-Term");
+    update_title();   /* DEF_TITLE while there is one session; "Kai-Term [2/3]" once there are several */
 
     if (W.comp_ver >= 3)
         wl_surface_set_buffer_scale(W.surface, 1);
@@ -1224,7 +1584,10 @@ static int wayland_setup(int init_w, int init_h)
         klog(L_ERROR, "wl_egl_window_create failed");
         return -1;
     }
-    if (render_init(&rend, W.display, W.egl_window, init_w, init_h, conf.opacity, conf.bg) < 0) {
+    /* conf.fg goes to the renderer because the tab bar's colours are mixed from the CONFIGURED palette:
+       an application may repaint its own cells but not the chrome that names its tab (see Render.fg). */
+    if (render_init(&rend, W.display, W.egl_window, init_w, init_h, conf.opacity, conf.bg,
+                    conf.fg) < 0) {
         klog(L_ERROR, "render_init failed");
         return -1;
     }
@@ -1280,7 +1643,7 @@ static void usage(const char *argv0, FILE *out)
             "usage: %s [OPTION]...\n\n"
             "  -e, --exec COMMAND      run COMMAND instead of the default shell\n"
             "  -w, --workingdir DIR    start the shell in DIR (default: $HOME)\n"
-            "  -c, --config FILE       read FILE instead of ~/.config/k-term/k-term.conf\n"
+            "  -c, --config FILE       read FILE instead of ~/.config/kai-term/kai-term.conf\n"
             "  -d, --debug             enable debug logging\n"
             "  -v, --version           print the version and exit\n"
             "  -h, --help              show this help and exit\n\n"
@@ -1308,7 +1671,7 @@ static const char *opt_value(const char *inline_val, char **argv, int *i, int ar
     if (inline_val)
         return inline_val;
     if (*i + 1 >= argc) {
-        fprintf(stderr, "k-term: %s needs an argument\n", flag);
+        fprintf(stderr, "kai-term: %s needs an argument\n", flag);
         return NULL;
     }
     return argv[++*i];
@@ -1328,7 +1691,7 @@ int main(int argc, char **argv)
             usage(argv[0], stdout);
             return 0;
         } else if (!strcmp(a, "-v") || longopt(a, "--version", &val)) {
-            printf("k-term 0.1.0 (prototype)\n");
+            printf("kai-term 0.1.0 (prototype)\n");
             return 0;
         } else if (!strcmp(a, "-d") || longopt(a, "--debug", &val)) {
             opt_debug = 1;      /* applied AFTER config_load: the CLI must beat `log =` in the config */
@@ -1348,18 +1711,23 @@ int main(int argc, char **argv)
                 return 1;
             opt_config = v;
         } else {
-            /* One generic path for every option K-Term does not take, including the flags that were
+            /* One generic path for every option Kai-Term does not take, including the flags that were
                dropped in the past: no per-flag explanation, just the message and the option list. */
-            fprintf(stderr, "k-term: unknown option '%s'\n", a);
+            fprintf(stderr, "kai-term: unknown option '%s'\n", a);
             usage(argv[0], stderr);
             return 1;
         }
     }
 
+    /* -d must also cover the diagnostics config_load() itself prints, which run BEFORE the file's
+       own `log =` value is known: raise the level first, then settle on the final one (the CLI still
+       beats the file, see the opt_debug handling below and the session-43 precedence fix). */
+    if (opt_debug)
+        kai_term_loglevel = L_DEBUG;
     config_load(&conf, opt_config);
     if (opt_debug)
         conf.loglevel = L_DEBUG;
-    k_term_loglevel = conf.loglevel;
+    kai_term_loglevel = conf.loglevel;
     base_font_size = conf.font_size;
     term_set_clear_scrollback(conf.clear_scrollback);
 
@@ -1384,33 +1752,38 @@ int main(int argc, char **argv)
     if (font_init(&font, conf.font, conf.font_size) < 0)
         return 1;
 
-    term_init(&term, conf.rows, conf.cols, conf.scrollback);
-    term.pen.bg = conf.bg;
-    term.pen.fg = conf.fg;
+    /* The first session. mux_init applies max_tabs; the tab exists before the window so the initial
+       window size can be computed from the configured grid, and its shell is spawned only once the
+       grid has the window's real size (after layout_apply below). */
+    mux_init(&mux, conf.max_tabs);
+    g_cmd = opt_cmd && opt_cmd[0] ? opt_cmd : (conf.shell[0] ? conf.shell : NULL);
+    snprintf(g_wdir, sizeof(g_wdir), "%s", wdir);
+    if (mux_open(&mux, conf.rows, conf.cols, conf.scrollback) < 0)
+        return 1;
+    cur_term()->pen.bg = conf.bg;
+    cur_term()->pen.fg = conf.fg;
 
-    /* The window is asked for the grid PLUS the margin on both sides; the compositor may answer with
-       a different pixel size, and term_size_changed() then recomputes cols/rows from what it got. */
-    int init_w = conf.cols * font.cell_w + 2 * conf.padding;
-    int init_h = conf.rows * font.cell_h + 2 * conf.padding;
+    /* The window is asked for the grid PLUS the margin on both sides; the compositor may answer with a
+       different pixel size, and layout_apply() then recomputes the panes and cols/rows from what it got.
+       With `tab_bar = always` the bar is drawn even for the single starting session, so the window must also
+       hold its row and its gap — otherwise the grid would come up one row short of `rows`. That arithmetic
+       lives in layout_initial_size() (src/layout.c) because it is layout_compute()'s inverse and only a
+       linked test can prove the two agree. */
+    int init_w, init_h;
+    layout_initial_size(conf.cols, conf.rows, font.cell_w, font.cell_h, conf.padding, PANE_GAP,
+                        conf.tab_bar, &init_w, &init_h);
 
     if (wayland_setup(init_w, init_h) < 0)
         return 1;
-    term_size_changed();   /* grid now matches window */
+    layout_apply();        /* the layout, and with it every session's grid, now matches the window */
 
-    /* apply configured default colors to the whole (resized) grid */
-    for (int y = 0; y < term.g.rows; y++) {
-        Cell *r = grid_vprow(&term.g, y);
-        for (int x = 0; x < term.g.cols; x++) {
-            r[x].bg = conf.bg;
-            r[x].fg = conf.fg;
-        }
-    }
+    /* apply the configured default colors to every (resized) session */
+    for (int i = 0; i < mux_count(&mux); i++)
+        paint_blank_cells(&mux.tab[i].term);
 
-    if (pty_spawn(&pty, opt_cmd && opt_cmd[0] ? opt_cmd : (conf.shell[0] ? conf.shell : NULL),
-                  term.g.rows, term.g.cols, wdir) < 0)
-        return 1;
-
-    /* epoll loop: wayland fd, pty master, timerfd, signalfd(SIGCHLD) */
+    /* epoll loop: wayland fd, one pty master per session, timerfd, signalfd(SIGCHLD). It is created
+       BEFORE the first shell is spawned because tab_spawn() is what registers the descriptor — the
+       same call every later tab uses. */
     int ep = epoll_create1(0);
     g_ep = ep;
     int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
@@ -1448,12 +1821,16 @@ int main(int argc, char **argv)
 
     ev = (struct epoll_event){ .events = EPOLLIN, .data.fd = wfd };
     epoll_ctl(ep, EPOLL_CTL_ADD, wfd, &ev);
-    ev = (struct epoll_event){ .events = EPOLLIN, .data.fd = pty.mfd };
-    epoll_ctl(ep, EPOLL_CTL_ADD, pty.mfd, &ev);
     ev = (struct epoll_event){ .events = EPOLLIN, .data.fd = tfd };
     epoll_ctl(ep, EPOLL_CTL_ADD, tfd, &ev);
     ev = (struct epoll_event){ .events = EPOLLIN, .data.fd = sfd };
     epoll_ctl(ep, EPOLL_CTL_ADD, sfd, &ev);
+
+    if (tab_spawn(&mux.tab[0]) < 0)
+        return 1;
+    klog(L_INFO, "mux: session 1/%d started (pid %d, grid %dx%d, max_tabs %d)",
+         mux_count(&mux), (int)mux.tab[0].pty.child, mux.tab[0].term.g.cols,
+         mux.tab[0].term.g.rows, mux.max);
 
     wl_flush();
     W.running = 1;
@@ -1515,28 +1892,43 @@ int main(int argc, char **argv)
             int fd = events[i].data.fd;
             if (fd == wfd) {
                 /* already read and dispatched above */
-            } else if (fd == pty.mfd) {
+            } else if (tab_for_fd(fd) >= 0) {
+                int ti = tab_for_fd(fd);
+                Tab *tb = &mux.tab[ti];
                 for (;;) {
-                    ssize_t r = read(pty.mfd, rbuf, sizeof(rbuf));
+                    ssize_t r = read(tb->pty.mfd, rbuf, sizeof(rbuf));
                     if (r > 0) {
                         /* New output is written relative to the LIVE view (the parser's cursor
                            addresses row[live_off + cy]). If the user is scrolled back, those rows
                            are currently on screen, so return the view to the live anchor first;
-                           otherwise the output would overwrite the lines being read. */
-                        if (term.g.scroll_off != term.g.live_off)
-                            snap_to_live();
-                        term_parse(&term, rbuf, (size_t)r);
+                           otherwise the output would overwrite the lines being read. Per session:
+                           this is the tab that produced the output, visible or not. */
+                        if (tb->term.g.scroll_off != tb->term.g.live_off)
+                            snap_to_live(&tb->term);
+                        term_parse(&tb->term, rbuf, (size_t)r);
                         /* Drain any terminal query responses (CPR, DA) queued by the parser */
-                        if (term.resp_len > 0) {
-                            pty_write(&pty, term.resp, (size_t)term.resp_len);
-                            term.resp_len = 0;
+                        if (tb->term.resp_len > 0) {
+                            pty_write(&tb->pty, tb->term.resp, (size_t)tb->term.resp_len);
+                            tb->term.resp_len = 0;
                         }
-                        W.dirty = 1;
+                        if (ti == mux_active(&mux) || layout_pane_of_tab(&g_layout, ti) >= 0) {
+                            /* The visible session, or one drawn NEXT TO it in side-by-side view: the picture
+                               changed, so redraw. A pane the user can already see needs no unread mark. */
+                            W.dirty = 1;
+                        } else if (mux_touch(&mux, ti)) {
+                            /* Nothing shows this session at all: do not touch its scroll position, but mark
+                               it in the bar and in the title, once, so the user can find the session that
+                               just finished something. With no bar the picture did not change at all, so
+                               there is nothing to redraw. */
+                            update_title();
+                            if (g_layout.bar_on)
+                                W.dirty = 1;
+                        }
                         if (r < (ssize_t)sizeof(rbuf))
                             break;
                     } else if (r == 0 || (r < 0 && errno != EINTR && errno != EAGAIN)) {
-                        klog(L_INFO, "pty closed");
-                        W.running = 0;
+                        klog(L_INFO, "mux: the pty of tab %d/%d closed", ti + 1, mux_count(&mux));
+                        tab_close(ti);   /* sets W.running = 0 when it was the last one */
                         break;
                     } else {
                         break;
@@ -1556,15 +1948,26 @@ int main(int argc, char **argv)
             } else if (fd == sfd) {
                 struct signalfd_siginfo si;
                 while (read(sfd, &si, sizeof(si)) == (ssize_t)sizeof(si)) {
-                    if (si.ssi_signo == SIGCHLD) {
-                        int st;
-                        pid_t done = waitpid(pty.child, &st, WNOHANG);
-                        if (done == pty.child) {
-                            klog(L_INFO, "child exited");
-                            W.running = 0;
-                            break;
+                    if (si.ssi_signo != SIGCHLD)
+                        continue;
+                    /* Several shells may be running and the one that exited is not necessarily the
+                       visible one, so reap by pid and match the pid to a tab. tab_close() drops that
+                       tab's descriptor; the application only exits when the last tab is gone. */
+                    int st;
+                    pid_t done;
+                    while ((done = waitpid(-1, &st, WNOHANG)) > 0) {
+                        int ti = tab_for_child(done);
+                        if (ti >= 0) {
+                            klog(L_INFO, "mux: the shell of tab %d/%d exited (pid %d)",
+                                 ti + 1, mux_count(&mux), (int)done);
+                            mux.tab[ti].pty.child = 0;  /* reaped: tab_close must not kill it again */
+                            tab_close(ti);
                         }
+                        if (!W.running)
+                            break;
                     }
+                    if (!W.running)
+                        break;
                 }
             } else if (paste_fd[0] >= 0 && fd == paste_fd[0]) {
                 /* Accumulate the clipboard text; it is written to the PTY as ONE bracketed block
@@ -1634,10 +2037,23 @@ int main(int argc, char **argv)
 
     render_destroy(&rend);
     wayland_destroy();
-    term_destroy(&term);
+    /* Every session: close its master (which hangs up the shell), stop the child if it is still
+       running, free its grids. The running loop reaps shells through the signalfd; on the way out a
+       WNOHANG waitpid is enough and keeps a stubborn child from stalling the exit. mux keeps the
+       array dense, so this touches exactly the sessions that still exist. */
+    for (int i = 0; i < mux_count(&mux); i++) {
+        Tab *tb = &mux.tab[i];
+        if (tb->pty.mfd >= 0) {
+            close(tb->pty.mfd);
+            tb->pty.mfd = -1;
+        }
+        if (tb->pty.child > 0) {
+            kill(tb->pty.child, SIGHUP);
+            waitpid(tb->pty.child, NULL, WNOHANG);
+        }
+        term_destroy(&tb->term);
+    }
     font_destroy(&font);
-    if (pty.mfd >= 0)
-        close(pty.mfd);
     close(tfd);
     close(sfd);
     if (pwfd >= 0)
@@ -1645,6 +2061,6 @@ int main(int argc, char **argv)
     if (krfd >= 0)
         close(krfd);
     close(ep);
-    klog(L_INFO, "k-term exiting");
+    klog(L_INFO, "kai-term exiting");
     return 0;
 }

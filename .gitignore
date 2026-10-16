@@ -1,4 +1,4 @@
-# K-Term build output (see the Makefile: src/*.c -> build/*.o -> bin/k-term)
+# Kai-Term build output (see the Makefile: src/*.c -> build/*.o -> bin/kai-term)
 bin/
 build/
 

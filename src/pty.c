@@ -1,5 +1,5 @@
-/* K-Term — PTY handling: fork a shell attached to a pseudo-terminal. */
-#include "k-term.h"
+/* Kai-Term — PTY handling: fork a shell attached to a pseudo-terminal. */
+#include "kai-term.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -69,9 +69,9 @@ int pty_spawn(Pty *p, const char *cmd, int rows, int cols, const char *dir)
         unsetenv("TERMCAP");
         setenv("TERM", "xterm-256color", 1);
         setenv("COLORTERM", "truecolor", 1);
-        setenv("TERM_PROGRAM", "k-term", 1);
+        setenv("TERM_PROGRAM", "kai-term", 1);
 
-        /* Start the shell in a known directory instead of inheriting wherever k-term itself was
+        /* Start the shell in a known directory instead of inheriting wherever kai-term itself was
            launched from (a file manager starting a terminal leaves it in its own cwd). main.c has
            already resolved the default to $HOME and validated the path. */
         if (dir && dir[0]) {

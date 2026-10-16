@@ -1,7 +1,7 @@
-/* K-Term — grid model sanity checker (no display needed).
+/* Kai-Term — grid model sanity checker (no display needed).
  * Verifies the row[] layout invariant after each stage and prints a compact
  * view of the scrollback + viewport row buffers. */
-#include "k-term.h"
+#include "kai-term.h"
 
 static Term T;
 static int problems;

@@ -1,5 +1,5 @@
-/* K-Term — unit tests for VT parser + grid (no display needed). */
-#include "k-term.h"
+/* Kai-Term — unit tests for VT parser + grid (no display needed). */
+#include "kai-term.h"
 
 static Term T;
 static int fails, checks;
@@ -111,6 +111,38 @@ static int wide_orphans(void)    /* continuation cells separated from their anch
                 o++;
     }
     return o;
+}
+
+/* ---------- layout helpers (the tab bar and the side-by-side panes) ---------- */
+
+/* A LayoutReq for `ntab` sessions. Titles start empty (so a label reads "<n> shell"); individual checks
+   overwrite rq->tab[i].title / .attention. */
+static void lreq(LayoutReq *rq, int mode, int ww, int wh, int cw, int ch, int pad, int gap,
+                 int ntab, int active, int split_max, int bar)
+{
+    memset(rq, 0, sizeof(*rq));
+    rq->mode = mode;
+    rq->win_w = ww; rq->win_h = wh;
+    rq->cell_w = cw; rq->cell_h = ch;
+    rq->pad = pad; rq->gap = gap;
+    rq->ntab = ntab; rq->active = active;
+    rq->split_max = split_max; rq->bar = bar;
+    for (int i = 0; i < ntab && i < TAB_MAX; i++)
+        rq->tab[i].tab = i;
+}
+
+/* Codepoints, not bytes — a label is only guaranteed to fit its item in COLUMNS, and a column holds one
+   codepoint however many bytes it takes. */
+static int utf8_len(const char *s)
+{
+    int n = 0;
+    for (const char *p = s; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c >= 0x80 && c < 0xc0)
+            continue;
+        n++;
+    }
+    return n;
 }
 
 int main(void)
@@ -707,6 +739,19 @@ int main(void)
     feed("\x1b[?1000;1002;1006l");
     CHECK(T.mouse_mode == 0, "all mouse modes cleared");
 
+    /* --- evdev BTN_* -> SGR button number (session 61: the local mapping had right and middle
+       swapped, which made a middle click on the tab bar do nothing and a RIGHT click close a session.
+       The kernel order is LEFT 0x110, RIGHT 0x111, MIDDLE 0x112; SGR/X10 want 0/1/2 in that name order.
+       The literals are written out here as well as through the enum, so changing the enum without the
+       real protocol order fails a check. --- */
+    CHECK(mouse_sgr_button(EVDEV_BTN_LEFT) == 0, "BTN_LEFT -> SGR 0");
+    CHECK(mouse_sgr_button(EVDEV_BTN_MIDDLE) == 1, "BTN_MIDDLE -> SGR 1");
+    CHECK(mouse_sgr_button(EVDEV_BTN_RIGHT) == 2, "BTN_RIGHT -> SGR 2");
+    CHECK(EVDEV_BTN_RIGHT == 0x111 && EVDEV_BTN_MIDDLE == 0x112, "BTN_RIGHT is 0x111, BTN_MIDDLE 0x112");
+    CHECK(mouse_sgr_button(0x111) == 2 && mouse_sgr_button(0x112) == 1,
+          "raw 0x111 is right, raw 0x112 is middle");
+    CHECK(mouse_sgr_button(0x113) == 3 && mouse_sgr_button(0) == 3, "side/extra/unknown -> SGR 3");
+
     /* --- empty/omitted params --- */
     feed("\x1b[2J\x1b[H");
     feed("\x1b[H\x1b[2;H");
@@ -1209,12 +1254,12 @@ int main(void)
 
     /* --- config: the app_id is configurable ---------------------------------------------------
        config.c is linked into this binary, so the file format itself is testable here. The expected
-       default is DEF_APP_ID (k-term.h), the same macro config_default() and main.c use. */
+       default is DEF_APP_ID (kai-term.h), the same macro config_default() and main.c use. */
     {
         Config c;
         config_default(&c);
-        CHECK(!strcmp(c.app_id, DEF_APP_ID) && !strcmp(c.app_id, "K-Term"),
-              "config: app_id defaults to K-Term");
+        CHECK(!strcmp(c.app_id, DEF_APP_ID) && !strcmp(c.app_id, "Kai-Term"),
+              "config: app_id defaults to Kai-Term");
         const char *path = "/tmp/kterm_test_config.conf";
         FILE *f = fopen(path, "w");
         CHECK(f != NULL, "config: temp config file writable");
@@ -1227,8 +1272,8 @@ int main(void)
             fputs("app_id =\n", f);
             fclose(f);
             config_load(&c, path);
-            CHECK(!strcmp(c.app_id, DEF_APP_ID) && !strcmp(c.app_id, "K-Term"),
-                  "config: an empty app_id falls back to K-Term");
+            CHECK(!strcmp(c.app_id, DEF_APP_ID) && !strcmp(c.app_id, "Kai-Term"),
+                  "config: an empty app_id falls back to Kai-Term");
             f = fopen(path, "w");
             fputs("app_id = io.github.kaida.kterm\n", f);
             fclose(f);
@@ -1277,7 +1322,7 @@ int main(void)
     }
 
     /* --- config: the key-repeat settings ------------------------------------------------------
-       A Wayland compositor never sends repeat events, so K-Term generates them itself and both
+       A Wayland compositor never sends repeat events, so Kai-Term generates them itself and both
        numbers are its own: repeat_delay (ms before the first repeat, 0 = off) and repeat_rate
        (repeats per second afterwards). Both are clamped so a typo cannot stall or flood the PTY. */
     {
@@ -1298,7 +1343,7 @@ int main(void)
             CHECK(c.repeat_delay == 500, "config: repeat_delay read from the file");
             CHECK(c.repeat_rate == 12, "config: repeat_rate read from the file");
             f = fopen(path, "w");
-            fputs("repeat_delay = 0\n", f);   /* the escape hatch: no K-Term-generated repeat */
+            fputs("repeat_delay = 0\n", f);   /* the escape hatch: no Kai-Term-generated repeat */
             fclose(f);
             config_default(&c);
             config_load(&c, path);
@@ -1361,6 +1406,434 @@ int main(void)
               "shrink after grow: live_off within both bounds");
         row_text(T.g.rows - 1, linebuf);
         CHECK(strstr(linebuf, "LAST") != NULL, "shrink after grow: the newest line is on screen");
+    }
+
+    /* --- multiplexing: the tab bookkeeping (src/mux.c) ----------------------------------------
+       One window hosts several sessions. Only the bookkeeping is testable here (the PTYs and the
+       window belong to main.c), and that is exactly where the bugs live: an active index pointing
+       past the end, a grid left behind or freed twice, a shifted Tab keeping a pointer into its old
+       home, or a limit that can be exceeded. */
+    {
+        Mux MX;
+        char ttl[128];
+
+        mux_init(&MX, 8);
+        CHECK(MX.max == 8, "mux: max_tabs kept");
+        mux_init(&MX, 0);
+        CHECK(MX.max == 1, "mux: max_tabs 0 clamps to 1 (a terminal must keep its first tab)");
+        mux_init(&MX, TAB_MAX + 500);
+        CHECK(MX.max == TAB_MAX, "mux: max_tabs clamps to TAB_MAX");
+        CHECK(mux_count(&MX) == 0 && mux_active(&MX) == -1 && mux_cur(&MX) == NULL,
+              "mux: an empty mux has no tab");
+        mux_title(&MX, ttl, sizeof ttl);
+        CHECK(!strcmp(ttl, DEF_TITLE), "mux: an empty mux still titles the window Kai-Term");
+        CHECK(mux_next(&MX) == -1 && mux_prev(&MX) == -1 && mux_goto(&MX, 0) == -1,
+              "mux: next/prev/goto on an empty mux do nothing");
+
+        mux_init(&MX, 3);
+        int t0 = mux_open(&MX, 6, 20, 50);
+        CHECK(t0 == 0 && mux_count(&MX) == 1 && mux_active(&MX) == 0,
+              "mux: the first tab is index 0 and the visible one");
+        CHECK(mux_cur(&MX) == &MX.tab[0], "mux: mux_cur names the visible tab");
+        CHECK(MX.tab[0].term.g.rows == 6 && MX.tab[0].term.g.cols == 20,
+              "mux: a new tab gets the requested grid");
+        CHECK(MX.tab[0].pty.mfd == -1 && MX.tab[0].pty.child == 0,
+              "mux: a new tab has no PTY yet (main.c owns spawning it)");
+        mux_title(&MX, ttl, sizeof ttl);
+        CHECK(!strcmp(ttl, DEF_TITLE), "mux: one tab keeps the pre-multiplexing title exactly");
+
+        int t1 = mux_open(&MX, 6, 20, 50);
+        int t2 = mux_open(&MX, 6, 20, 50);
+        CHECK(t1 == 1 && t2 == 2 && mux_count(&MX) == 3, "mux: tabs stay dense 0..n-1");
+        CHECK(mux_active(&MX) == 2, "mux: opening a tab makes it the visible one");
+        CHECK(mux_open(&MX, 6, 20, 50) == -1 && mux_count(&MX) == 3,
+              "mux: max_tabs stops a fourth tab");
+        mux_title(&MX, ttl, sizeof ttl);
+        CHECK(!strcmp(ttl, "Kai-Term [3/3]"), "mux: the title says which tab of how many");
+
+        /* Mark every tab: a distinct glyph in cell (0,0) and a distinct OSC title. The title also
+           arms Term.ps.t (osc_end() reads the parser's back-pointer), which is what the shift on
+           close must repair. One tab is put on the alt screen so mux_close() has to free BOTH of
+           its grids (ASan checks that nothing leaks or is freed twice). */
+        for (int i = 0; i < 3; i++) {
+            char mark = (char)('A' + i);
+            term_parse(&MX.tab[i].term, (const uint8_t *)&mark, 1);
+            char seq[32];
+            snprintf(seq, sizeof seq, "\x1b]0;T%d\x07", i);
+            term_parse(&MX.tab[i].term, (const uint8_t *)seq, strlen(seq));
+        }
+        const char *alt = "\x1b[?1049h";
+        term_parse(&MX.tab[2].term, (const uint8_t *)alt, strlen(alt));
+        CHECK(MX.tab[2].term.alt_screen == 1, "mux: tab 2 is on the alternate screen");
+        CHECK(grid_vprow(&MX.tab[2].term.g, 0)[0].ch == 0, "mux: the alt screen starts blank");
+
+        CHECK(mux_goto(&MX, 0) == 0, "mux: goto 0");
+        mux_title(&MX, ttl, sizeof ttl);
+        CHECK(!strcmp(ttl, "Kai-Term [1/3]"), "mux: the title follows the visible tab");
+        CHECK(mux_goto(&MX, 99) == 2 && mux_goto(&MX, -7) == 0,
+              "mux: goto clamps instead of rejecting an out-of-range index");
+        CHECK(mux_next(&MX) == 1 && mux_next(&MX) == 2 && mux_next(&MX) == 0,
+              "mux: next wraps around");
+        CHECK(mux_prev(&MX) == 2, "mux: prev wraps around backwards");
+
+        CHECK(mux_touch(&MX, 1) == 1 && mux_touch(&MX, 1) == 0,
+              "mux: touch marks a hidden tab once, then reports nothing new");
+        CHECK(mux_touch(&MX, mux_active(&MX)) == 0, "mux: the visible tab never marks itself");
+        mux_touch(&MX, 0);          /* the other hidden tab */
+        mux_title(&MX, ttl, sizeof ttl);
+        CHECK(!strcmp(ttl, "Kai-Term [3/3] !2"), "mux: unread output on hidden tabs is reported");
+        CHECK(mux_goto(&MX, 1) == 1, "mux: goto 1");
+        mux_title(&MX, ttl, sizeof ttl);
+        CHECK(!strcmp(ttl, "Kai-Term [2/3] !1"), "mux: looking at a tab clears its unread mark");
+
+        /* Close the MIDDLE tab while it is visible: the later one must slide down with its content,
+           its parser back-pointer must point at its new home, and the vacated slot must be dead. */
+        CHECK(mux_close(&MX, 1) == 1 && mux_count(&MX) == 2,
+              "mux: closing the visible middle tab keeps two tabs and stays in bounds");
+        CHECK(grid_vprow(&MX.tab[1].term.g, 0)[0].ch == 0 &&
+              !strcmp(MX.tab[1].term.title, "T2"),
+              "mux: the tab after a closed one slides down with its content intact");
+        CHECK(MX.tab[1].term.ps.t == &MX.tab[1].term,
+              "mux: a moved tab's parser points at its new home (ps.t re-armed)");
+        CHECK(MX.tab[2].term.g.valid != GRID_VALID && MX.tab[2].term.g.row == NULL,
+              "mux: the vacated slot is zeroed, so its grids cannot be freed twice");
+        CHECK(mux_close(&MX, 1) == 0 && mux_count(&MX) == 1 && mux_active(&MX) == 0,
+              "mux: closing the last-indexed visible tab steps back to the one before it");
+        mux_title(&MX, ttl, sizeof ttl);
+        CHECK(!strcmp(ttl, DEF_TITLE), "mux: back to one tab, back to the plain title");
+        CHECK(mux_close(&MX, 7) == mux_active(&MX) && mux_count(&MX) == 1,
+              "mux: closing a tab that does not exist changes nothing");
+        CHECK(mux_close(&MX, 0) == -1 && mux_count(&MX) == 0 && mux_active(&MX) == -1 &&
+              mux_cur(&MX) == NULL, "mux: closing the last tab reports -1 so main.c can quit");
+
+        CHECK(mux_open(&MX, 4, 10, 20) == 0, "mux: a slot is reusable after every tab closed");
+        CHECK(grid_vprow(&MX.tab[0].term.g, 0)[0].ch == 0 && MX.tab[0].term.title[0] == 0,
+              "mux: a reused slot starts empty, not as the old tab");
+        mux_close(&MX, 0);
+    }
+
+    /* --- config: the key-binding specs ("Ctrl+Shift+T") ----------------------------------------
+       Every tab action is rebindable from the config file, so the spec parser is user-facing. The
+       two rules that protect the user from themselves: a binding with NO modifier is refused (it
+       would take a plain typing key away from the shell), and a spec that does not parse keeps the
+       binding already in place rather than silently disabling the action. */
+    {
+        KeyBind KB;
+        CHECK(keybind_parse("Ctrl+Shift+T", &KB) && KB.set == 1 &&
+              KB.mods == (KB_CTRL | KB_SHIFT) && KB.sym == 't',
+              "keybind: Ctrl+Shift+T parses to ctrl+shift+t");
+        CHECK(keybind_parse("ctrl+shift+t", &KB) && KB.sym == 't',
+              "keybind: the spec is case-insensitive (it names the key, not the Shift state)");
+        CHECK(keybind_parse(" Ctrl + Shift + T ", &KB) && KB.mods == (KB_CTRL | KB_SHIFT) &&
+              KB.sym == 't', "keybind: spaces around the tokens are ignored");
+        CHECK(keybind_parse("Control+Shift+Right", &KB) && KB.sym == KB_KEY_Right &&
+              KB.sym == 0xff53, "keybind: a named key uses the X keysym number xkb returns");
+        CHECK(keybind_parse("Ctrl+Shift+F12", &KB) && KB.sym == KB_KEY_F12, "keybind: F12");
+        CHECK(keybind_parse("Alt+1", &KB) && KB.sym == '1' && KB.mods == KB_ALT, "keybind: a digit key");
+        CHECK(keybind_parse("Mod1+Mod4+Up", &KB) && KB.mods == (KB_ALT | KB_SUPER) &&
+              KB.sym == KB_KEY_Up, "keybind: xkb modifier names are accepted");
+        CHECK(!keybind_parse("T", &KB) && KB.set == 0,
+              "keybind: a binding with no modifier is refused (it would swallow typing)");
+        CHECK(!keybind_parse("Ctrl+Bogus", &KB) && KB.set == 0, "keybind: an unknown key name is refused");
+        CHECK(!keybind_parse("Ctrl+Shift+T+U", &KB), "keybind: two keys in one spec is refused");
+        CHECK(!keybind_parse("Ctrl", &KB), "keybind: modifiers with no key is refused");
+        CHECK(!keybind_parse("", &KB), "keybind: an empty spec is refused");
+
+        unsigned MM = 7;
+        CHECK(keymods_parse("Ctrl+Shift", &MM) && MM == (KB_CTRL | KB_SHIFT), "keymods: Ctrl+Shift");
+        MM = 7;
+        CHECK(keymods_parse("mod1+mod4", &MM) && MM == (KB_ALT | KB_SUPER), "keymods: xkb names work");
+        MM = 7;
+        CHECK(!keymods_parse("Ctrl+T", &MM) && MM == 0, "keymods: a key in a modifier-only spec is refused");
+        MM = 7;
+        CHECK(!keymods_parse("", &MM) && MM == 0, "keymods: an empty spec is refused");
+    }
+
+    /* --- config: the multiplexing settings ---------------------------------------------------
+       max_tabs plus the five bindings. A binding the file does not mention keeps its default, and a
+       bad spec must not disable the action the user was trying to change. */
+    {
+        Config c;
+        const char *path = "/tmp/kterm_test_config4.conf";
+        config_default(&c);
+        CHECK(c.max_tabs == 8, "config: max_tabs defaults to 8");
+        CHECK(c.key_new_tab.set && c.key_new_tab.sym == 't' &&
+              c.key_new_tab.mods == (KB_CTRL | KB_SHIFT), "config: the default new-tab binding");
+        CHECK(c.key_close_tab.set && c.key_close_tab.sym == 'w' &&
+              c.key_close_tab.mods == (KB_CTRL | KB_SHIFT), "config: the default close-tab binding");
+        CHECK(c.key_next_tab.set && c.key_next_tab.sym == KB_KEY_Right,
+              "config: the default next-tab binding");
+        CHECK(c.key_prev_tab.set && c.key_prev_tab.sym == KB_KEY_Left,
+              "config: the default prev-tab binding");
+        CHECK(c.tab_prefix_mods == (KB_CTRL | KB_SHIFT), "config: the default tab prefix is Ctrl+Shift");
+        FILE *f = fopen(path, "w");
+        CHECK(f != NULL, "config: temp config file writable (key bindings)");
+        if (f) {
+            fclose(f);
+            f = fopen(path, "w");
+            fputs("key_new_tab = Alt+N\nkey_close_tab = Ctrl+Alt+W\n"
+                  "key_next_tab = Super+Right\nkey_tab_prefix = Alt\nmax_tabs = 3\n", f);
+            fclose(f);
+            config_default(&c);
+            config_load(&c, path);
+            CHECK(c.key_new_tab.set && c.key_new_tab.sym == 'n' && c.key_new_tab.mods == KB_ALT,
+                  "config: key_new_tab = Alt+N rebinds it");
+            CHECK(c.key_close_tab.mods == (KB_CTRL | KB_ALT), "config: key_close_tab = Ctrl+Alt+W");
+            CHECK(c.key_next_tab.mods == KB_SUPER, "config: key_next_tab = Super+Right");
+            CHECK(c.tab_prefix_mods == KB_ALT, "config: key_tab_prefix = Alt");
+            CHECK(c.max_tabs == 3, "config: max_tabs read from the file");
+            CHECK(c.key_prev_tab.set && c.key_prev_tab.sym == KB_KEY_Left,
+                  "config: a binding the file does not mention keeps its default");
+
+            f = fopen(path, "w");
+            fputs("key_new_tab = none\nkey_tab_prefix = off\nmax_tabs = 0\n", f);
+            fclose(f);
+            config_default(&c);
+            config_load(&c, path);
+            CHECK(c.key_new_tab.set == 0, "config: key_new_tab = none unbinds the action");
+            CHECK(c.tab_prefix_mods == 0, "config: key_tab_prefix = off disables the digit shortcut");
+            CHECK(c.max_tabs == 1, "config: max_tabs = 0 clamps to 1");
+
+            f = fopen(path, "w");
+            fputs("key_new_tab =\nkey_close_tab = Ctrl+Shift+Nope\nmax_tabs = 99999\n", f);
+            fclose(f);
+            config_default(&c);
+            config_load(&c, path);
+            CHECK(c.key_new_tab.set == 0, "config: an empty value unbinds too");
+            CHECK(c.key_close_tab.set && c.key_close_tab.sym == 'w',
+                  "config: an unparseable binding keeps the default instead of disabling the action");
+            CHECK(c.max_tabs == TAB_MAX, "config: max_tabs clamps to TAB_MAX");
+            remove(path);
+        }
+    }
+
+    /* --- config: how the sessions are shown (tab_bar / split_max / key_toggle_layout) ---------
+       These three decide what the user SEES of the multiplexing, so each value has to be readable and a
+       bad one must never turn the bar off by accident. */
+    {
+        Config c;
+        const char *path = "/tmp/kterm_test_config5.conf";
+        config_default(&c);
+        CHECK(c.tab_bar == BAR_AUTO, "config: tab_bar defaults to auto (bar from the second session)");
+        CHECK(c.split_max == 4, "config: split_max defaults to 4");
+        CHECK(c.key_toggle_layout.set && c.key_toggle_layout.sym == 's' &&
+              c.key_toggle_layout.mods == (KB_CTRL | KB_SHIFT),
+              "config: the default layout toggle is Ctrl+Shift+S");
+        FILE *f = fopen(path, "w");
+        CHECK(f != NULL, "config: temp config file writable (layout settings)");
+        if (f) {
+            fputs("tab_bar = always\nsplit_max = 2\nkey_toggle_layout = Alt+Return\n", f);
+            fclose(f);
+            config_default(&c);
+            config_load(&c, path);
+            CHECK(c.tab_bar == BAR_ALWAYS, "config: tab_bar = always");
+            CHECK(c.split_max == 2, "config: split_max = 2");
+            CHECK(c.key_toggle_layout.set && c.key_toggle_layout.sym == KB_KEY_Return &&
+                  c.key_toggle_layout.mods == KB_ALT, "config: key_toggle_layout = Alt+Return");
+
+            f = fopen(path, "w");
+            fputs("tab_bar = off\nsplit_max = 0\nkey_toggle_layout = none\n", f);
+            fclose(f);
+            config_default(&c);
+            config_load(&c, path);
+            CHECK(c.tab_bar == BAR_OFF, "config: tab_bar = off hides the bar completely");
+            CHECK(c.split_max == 1, "config: split_max = 0 clamps to 1 (a split view needs a pane)");
+            CHECK(c.key_toggle_layout.set == 0, "config: key_toggle_layout = none unbinds the toggle");
+
+            f = fopen(path, "w");
+            fputs("tab_bar = sometimes\nsplit_max = 99999\n", f);
+            fclose(f);
+            config_default(&c);
+            config_load(&c, path);
+            CHECK(c.tab_bar == BAR_AUTO, "config: an unknown tab_bar value keeps the current one");
+            CHECK(c.split_max == TAB_MAX, "config: split_max clamps to TAB_MAX");
+            remove(path);
+        }
+    }
+
+    /* --- layout: the tab bar and the side-by-side panes ----------------------------------------
+       The bar, the click targets and the panes are all decided by one pure function, so every rule that
+       the user can see (or trip over) is checkable here: the single-session window must not change shape,
+       a click must name the tab it is drawn on, a pane's grid must fit its rect, and the pointer mapping
+       (col = (ptr_x - pane.x)/cell_w) must stay exact because the leftover pixels stay at the right. */
+    {
+        LayoutReq rq;
+        Layout L;
+
+        /* One session, bar off: exactly the geometry the terminal had before multiplexing. */
+        lreq(&rq, LAYOUT_TABS, 936, 1002, 8, 17, 8, 8, 1, 0, 4, BAR_OFF);
+        layout_compute(&rq, &L);
+        int gcols, grows, gxoff, gyoff;
+        term_grid_geometry(936, 1002, 8, 17, 8, &gcols, &grows, &gxoff, &gyoff);
+        CHECK(!L.bar_on && L.nitem == 0 && L.npane == 1,
+              "layout: one session with tab_bar off draws one pane and no bar");
+        CHECK(L.pane[0].x == gxoff && L.pane[0].y == gyoff &&
+              L.pane[0].cols == gcols && L.pane[0].rows == grows,
+              "layout: one pane with the bar off is exactly the old single-grid geometry");
+        CHECK(L.pane[0].w == 936 - 16 && L.pane[0].h == 1002 - 16,
+              "layout: the pane is the window minus the margin on both sides");
+        CHECK(L.pane[0].cols * 8 <= L.pane[0].w && L.pane[0].rows * 17 <= L.pane[0].h,
+              "layout: a pane's grid never grows past its rect");
+
+        /* The bar appears by itself at the second session (BAR_AUTO). */
+        lreq(&rq, LAYOUT_TABS, 936, 1002, 8, 17, 8, 8, 2, 1, 4, BAR_AUTO);
+        layout_compute(&rq, &L);
+        CHECK(L.bar_on && L.nitem == 2 && L.npane == 1,
+              "layout: BAR_AUTO shows the bar from the second session on");
+        CHECK(L.bar_y == 8 && L.bar_h == 17 && L.bar_x == 8 && L.bar_w == 920,
+              "layout: the bar is one cell row inside the top margin");
+        CHECK(L.pane[0].y == 8 + 17 + 8 && L.pane[0].h == 1002 - (8 + 17 + 8) - 8,
+              "layout: the grid starts below the bar + gap and keeps its bottom margin");
+        CHECK(L.pane[0].rows == (1002 - 33 - 8) / 17, "layout: the bar costs exactly one text row");
+        CHECK(L.item[0].x == 8 && L.item[1].x == 8 + 460 && L.item[0].w == 460,
+              "layout: bar items are equal width, leftover px at the right");
+        CHECK(L.item[0].tab == 0 && L.item[1].tab == 1, "layout: an item names its session by index");
+        CHECK(L.item[1].active == 1 && L.item[0].active == 0,
+              "layout: the item of the visible session is the highlighted one");
+        CHECK(layout_hit_bar(&L, 100, 12) == 0 && layout_hit_bar(&L, 500, 12) == 1,
+              "layout: a click in the bar names the item it lands on (what makes tabs clickable)");
+        CHECK(layout_hit_bar(&L, 100, 100) == -1 && layout_hit_bar(&L, 4, 12) == -1,
+              "layout: a click below the bar or in the margin is not in the bar");
+        CHECK(layout_hit_pane(&L, 100, 100) == 0 && layout_hit_pane(&L, 100, 12) == -1,
+              "layout: the bar is not part of any pane");
+
+        /* Labels: number, unread mark, OSC title, and a cut that fits the item. */
+        CHECK(!strcmp(L.item[0].label, "1 shell"),
+              "layout: an unnamed session is labelled by its number + shell");
+        lreq(&rq, LAYOUT_TABS, 936, 1002, 8, 17, 8, 8, 2, 1, 4, BAR_AUTO);
+        rq.tab[0].attention = 1;
+        rq.tab[1].title = "vim";
+        layout_compute(&rq, &L);
+        CHECK(!strcmp(L.item[0].label, "1 *shell"),
+              "layout: unread output on a hidden session marks its item");
+        CHECK(!strcmp(L.item[1].label, "2 vim"), "layout: a session's OSC title is its label");
+
+        lreq(&rq, LAYOUT_TABS, 80, 400, 8, 17, 8, 8, 2, 0, 4, BAR_AUTO);   /* items 32 px = 4 columns */
+        rq.tab[0].title = "a\xc3\xa9" "b";                                  /* "aéb" (\x.. is greedy) */
+        layout_compute(&rq, &L);
+        CHECK(!strcmp(L.item[0].label, "1 a\xc3\xa9"),
+              "layout: a label is cut to the item width at a UTF-8 codepoint edge, never mid-sequence");
+        for (int i = 0; i < L.nitem; i++)
+            if (utf8_len(L.item[i].label) * 8 > L.item[i].w) {
+                CHECK(0, "layout: a label never needs more columns than its item has");
+                break;
+            }
+
+        /* Side-by-side: equal panes, the gap between them, each grid fitted to its own rect. */
+        lreq(&rq, LAYOUT_SPLIT, 936, 1002, 8, 17, 8, 8, 3, 0, 3, BAR_AUTO);
+        layout_compute(&rq, &L);
+        CHECK(L.npane == 3 && L.nitem == 3, "layout: split mode draws one pane per session");
+        CHECK(L.pane[0].x == 8 && L.pane[0].w == (920 - 2 * 8) / 3,
+              "layout: split panes share the width equally");
+        CHECK(L.pane[1].x == 8 + 301 + 8 && L.pane[2].x == 8 + 2 * (301 + 8),
+              "layout: the gap separates the panes");
+        CHECK(L.pane[0].cols == 301 / 8 && L.pane[0].rows == (1002 - 33 - 8) / 17,
+              "layout: every pane gets the grid that fits its own rect");
+        int overlap = 0;
+        for (int i = 0; i + 1 < L.npane; i++)
+            if (L.pane[i].x + L.pane[i].w > L.pane[i + 1].x ||
+                L.pane[i].y != L.pane[i + 1].y || L.pane[i].h != L.pane[i + 1].h)
+                overlap = 1;
+        CHECK(!overlap, "layout: panes never overlap and share one top edge and height");
+        CHECK(layout_hit_pane(&L, L.pane[1].x + 5, 200) == 1,
+              "layout: a click in a pane names that pane (click to focus)");
+        CHECK(layout_hit_pane(&L, L.pane[0].x + L.pane[0].w + 2, 200) == -1,
+              "layout: a click in the gap between panes belongs to no pane");
+        CHECK(layout_pane_of_tab(&L, 2) == 2 && layout_pane_of_tab(&L, 5) == -1,
+              "layout: pane_of_tab finds a drawn session and rejects one that is not drawn");
+
+        /* More sessions than split_max: the shown window slides to contain the active one. */
+        lreq(&rq, LAYOUT_SPLIT, 936, 1002, 8, 17, 8, 8, 6, 0, 3, BAR_AUTO);
+        layout_compute(&rq, &L);
+        CHECK(L.npane == 3 && L.pane[0].tab == 0 && L.pane[2].tab == 2,
+              "layout: split_max caps the panes, starting at the first session");
+        CHECK(layout_pane_of_tab(&L, 5) == -1 && layout_pane_of_tab(&L, 0) == 0,
+              "layout: a session outside the visible pane window has no pane");
+        rq.active = 5;
+        layout_compute(&rq, &L);
+        CHECK(L.pane[0].tab == 3 && L.pane[2].tab == 5,
+              "layout: the pane window slides to the end so the last session is reachable");
+        rq.active = 3;
+        layout_compute(&rq, &L);
+        CHECK(L.pane[0].tab == 2 && L.pane[2].tab == 4, "layout: the pane window centres on the active one");
+        CHECK(L.nitem == 6, "layout: the bar still lists every session, drawn in a pane or not");
+
+        /* Tab mode: the single pane shows the visible session, and only it has a pane. */
+        lreq(&rq, LAYOUT_TABS, 936, 1002, 8, 17, 8, 8, 3, 2, 4, BAR_AUTO);
+        layout_compute(&rq, &L);
+        CHECK(L.npane == 1 && L.pane[0].tab == 2, "layout: tab mode draws the visible session only");
+        CHECK(layout_pane_of_tab(&L, 2) == 0 && layout_pane_of_tab(&L, 0) == -1,
+              "layout: the hidden sessions of tab mode have no pane (their output marks the bar instead)");
+
+        /* Degenerate windows: the terminal wins over the chrome, and a grid is never empty. */
+        lreq(&rq, LAYOUT_TABS, 30, 30, 8, 17, 20, 8, 2, 0, 4, BAR_AUTO);
+        layout_compute(&rq, &L);
+        CHECK(!L.bar_on, "layout: a window too short for bar + one row drops the bar, not the text");
+        CHECK(L.npane == 1 && L.pane[0].cols >= 1 && L.pane[0].rows >= 1,
+              "layout: even a tiny window keeps a usable grid (the margin is capped)");
+        lreq(&rq, LAYOUT_TABS, 936, 1002, 8, 17, 8, 8, 0, -1, 4, BAR_ALWAYS);
+        layout_compute(&rq, &L);
+        CHECK(L.npane == 0 && L.nitem == 0 && !L.bar_on,
+              "layout: no sessions means no pane and no bar, even with tab_bar = always");
+        lreq(&rq, LAYOUT_SPLIT, 100, 100, 8, 17, 0, 0, 2, 0, 2, BAR_AUTO);
+        layout_compute(&rq, &L);
+        CHECK(L.pane[0].x == 0 && L.pane[1].x == 50 && L.pane[0].cols == 6 && L.pane[0].rows == 4,
+              "layout: padding 0 keeps the old edge-to-edge layout with adjacent panes");
+        lreq(&rq, LAYOUT_TABS, 936, 1002, 8, 17, -5, -5, 2, 0, 4, BAR_ALWAYS);
+        layout_compute(&rq, &L);
+        CHECK(L.bar_on && L.pane[0].x == 0 && L.pane[0].y == 17,
+              "layout: a negative padding or gap is treated as 0");
+
+        /* layout_grid_size(): the grid size EVERY session of a layout gets, drawn or not. src/main.c
+           resizes all of its sessions to this, which is what makes a tab switch cost nothing (no resize,
+           no SIGWINCH, no reflow on every switch) — so it has to be one size for the whole layout. */
+        lreq(&rq, LAYOUT_TABS, 936, 1002, 8, 17, 8, 8, 3, 2, 4, BAR_AUTO);
+        layout_compute(&rq, &L);
+        int lcols, lrows;
+        layout_grid_size(&L, &lcols, &lrows);
+        CHECK(lcols == L.pane[0].cols && lrows == L.pane[0].rows,
+              "layout: grid_size names the grid of this layout's panes");
+        int unequal = 0;
+        for (int i = 0; i < L.npane; i++)
+            if (L.pane[i].cols != lcols || L.pane[i].rows != lrows)
+                unequal = 1;
+        CHECK(!unequal, "layout: every pane of one layout has the same grid, so switching never resizes");
+        lreq(&rq, LAYOUT_SPLIT, 936, 1002, 8, 17, 8, 8, 6, 5, 3, BAR_AUTO);
+        layout_compute(&rq, &L);
+        layout_grid_size(&L, &lcols, &lrows);
+        CHECK(L.npane == 3 && lcols == L.pane[2].cols && lrows == L.pane[2].rows,
+              "layout: a session outside the visible pane window still gets the size its pane will have");
+        lreq(&rq, LAYOUT_TABS, 936, 1002, 8, 17, 8, 8, 0, -1, 4, BAR_ALWAYS);
+        layout_compute(&rq, &L);
+        layout_grid_size(&L, &lcols, &lrows);
+        CHECK(lcols == 0 && lrows == 0,
+              "layout: no pane means no grid size, so a caller must not resize to it");
+
+        /* layout_initial_size(): the window size src/main.c asks the compositor for at startup has to be
+           big enough that layout_compute() gives back EXACTLY the configured cols x rows. The bar costs one
+           cell ROW plus the gap — cell_h, not cell_w — and the round trip below is the only thing that can
+           catch that typo, because the two halves live in one module the tests link while main.c is in none
+           of them. A non-square cell (8x17) is what makes the difference visible. */
+        int iw, ih;
+        layout_initial_size(80, 30, 8, 17, 8, 8, BAR_ALWAYS, &iw, &ih);
+        CHECK(iw == 80 * 8 + 16 && ih == 30 * 17 + 16 + 17 + 8,
+              "layout: the startup window is the grid + the margin + one bar ROW and its gap");
+        lreq(&rq, LAYOUT_TABS, iw, ih, 8, 17, 8, 8, 1, 0, 4, BAR_ALWAYS);
+        layout_compute(&rq, &L);
+        layout_grid_size(&L, &lcols, &lrows);
+        CHECK(lcols == 80 && lrows == 30,
+              "layout: a tab_bar = always startup really gets the configured cols x rows back");
+        layout_initial_size(80, 30, 8, 17, 8, 8, BAR_AUTO, &iw, &ih);
+        CHECK(iw == 80 * 8 + 16 && ih == 30 * 17 + 16,
+              "layout: with tab_bar = auto the single starting session needs no bar row");
+        lreq(&rq, LAYOUT_TABS, iw, ih, 8, 17, 8, 8, 1, 0, 4, BAR_AUTO);
+        layout_compute(&rq, &L);
+        layout_grid_size(&L, &lcols, &lrows);
+        CHECK(lcols == 80 && lrows == 30,
+              "layout: a tab_bar = auto startup gets the configured cols x rows back too");
+        layout_initial_size(80, 30, 8, 8, 0, 0, BAR_ALWAYS, &iw, &ih);
+        CHECK(iw == 640 && ih == 248,
+              "layout: padding 0 with a square cell gives the edge-to-edge startup size");
     }
 
     term_destroy(&T);

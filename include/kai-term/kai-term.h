@@ -1,6 +1,6 @@
-/* K-Term — lightweight Wayland terminal emulator. Shared header. */
-#ifndef K_TERM_H
-#define K_TERM_H
+/* Kai-Term — lightweight Wayland terminal emulator. Shared header. */
+#ifndef KAI_TERM_H
+#define KAI_TERM_H
 
 #include <stdarg.h>
 #include <stdint.h>
@@ -10,7 +10,7 @@
 
 /* ---------- logging ---------- */
 enum { L_ERROR = 0, L_WARN, L_INFO, L_DEBUG };
-extern int k_term_loglevel;
+extern int kai_term_loglevel;
 void klog(int level, const char *fmt, ...);
 
 /* ---------- colors & cell attributes ---------- */
@@ -22,7 +22,12 @@ void klog(int level, const char *fmt, ...);
 /* Default xdg-shell app_id. Single-sourced here because config_default(), the
    `app_id =` empty-value fallback in config.c and the last-resort fallback in main.c must all agree;
    three string literals that can drift apart is how a default silently changes. */
-#define DEF_APP_ID  "K-Term"
+#define DEF_APP_ID  "Kai-Term"
+
+/* Default window title. mux_title() builds the toplevel title from it; the tab bar shows the same state
+   INSIDE the window, the title is what a compositor or a taskbar shows. Single-sourced for the same reason
+   as DEF_APP_ID. */
+#define DEF_TITLE   "Kai-Term"
 
 /* Max continuation codepoints stored on one emoji anchor cell (base excluded). Covers the
    common ZWJ sequences: family 👨\u200d👩\u200d👧\u200d👦 = 6 continuation codepoints. */
@@ -50,6 +55,18 @@ enum {
     MOUSE_DRAG  = 1 << 1,   /* ?1002: also report motion while a button is held */
     MOUSE_SGR   = 1 << 2,   /* ?1006: use SGR (1006) encoding, else legacy X10 */
 };
+
+/* The button codes wl_pointer.button delivers are the Linux kernel's BTN_* values
+   (linux/input-event-codes.h), and they are NOT in the order the terminal protocols number the buttons:
+   BTN_LEFT 0x110, BTN_RIGHT 0x111, BTN_MIDDLE 0x112, while both the SGR (1006) and the legacy X10
+   encodings want 0 = left, 1 = middle, 2 = right. mouse_sgr_button() (vt.c) is the one mapping; the
+   constants live here so nothing re-derives them from the definition order. */
+enum {
+    EVDEV_BTN_LEFT   = 0x110,
+    EVDEV_BTN_RIGHT  = 0x111,
+    EVDEV_BTN_MIDDLE = 0x112,
+};
+int mouse_sgr_button(uint32_t evdev_code);   /* 0 left, 1 middle, 2 right, 3 any other button */
 
 typedef struct {
     uint32_t ch;    /* codepoint; 0 = blank */
@@ -220,7 +237,7 @@ void term_select_clear(Term *t);
 
 /* Setting for CSI 3 J ("erase saved lines"): 1 (default) lets it drop the scrollback buffer, 0 keeps
    the history. It is a process-wide setting rather than Term state because `ESC c` / RIS rebuilds the
-   Term (term_init) and must not silently re-enable it — same pattern as k_term_loglevel. */
+   Term (term_init) and must not silently re-enable it — same pattern as kai_term_loglevel. */
 void term_set_clear_scrollback(int on);
 
 /* ---------- paste (src/vt.c) ---------- */
@@ -232,6 +249,65 @@ void term_set_clear_scrollback(int on);
    or -1 when out (cap bytes) is too small — the caller then sends the paste unwrapped rather than
    truncating it. Pure byte math, so it is unit-testable without a display. */
 int paste_wrap(int bracketed, const char *text, size_t len, char *out, size_t cap);
+
+/* ---------- configurable key bindings ---------- */
+
+/* Modifier bits a binding may name. Deliberately NOT xkbcommon's masks: the config parser must not
+   depend on xkbcommon (it is linked into the unit tests), and src/main.c translates the effective
+   xkb mask into exactly these four bits before matching. Locks (Caps/Num) are not modifiers here. */
+enum {
+    KB_CTRL  = 1u << 0,
+    KB_SHIFT = 1u << 1,
+    KB_ALT   = 1u << 2,
+    KB_SUPER = 1u << 3,
+};
+
+/* Keysyms for the non-printable keys a binding may name. These are the standard X keysym numbers,
+   which is what xkb_state_key_get_one_sym() returns; src/main.c _Static_asserts every one of them
+   against the xkbcommon constant, so a typo here cannot silently make a binding dead. */
+enum {
+    KB_KEY_BackSpace = 0xff08,
+    KB_KEY_Tab       = 0xff09,
+    KB_KEY_Return    = 0xff0d,
+    KB_KEY_Escape    = 0xff1b,
+    KB_KEY_Space     = 0x0020,
+    KB_KEY_Prior     = 0xff55,   /* Page_Up   */
+    KB_KEY_Next      = 0xff56,   /* Page_Down */
+    KB_KEY_Home      = 0xff50,
+    KB_KEY_End       = 0xff57,
+    KB_KEY_Insert    = 0xff63,
+    KB_KEY_Delete    = 0xffff,
+    KB_KEY_Left      = 0xff51,
+    KB_KEY_Up        = 0xff52,
+    KB_KEY_Right     = 0xff53,
+    KB_KEY_Down      = 0xff54,
+    KB_KEY_F1        = 0xffbe,
+    KB_KEY_F2        = 0xffbf,
+    KB_KEY_F3        = 0xffc0,
+    KB_KEY_F4        = 0xffc1,
+    KB_KEY_F5        = 0xffc2,
+    KB_KEY_F6        = 0xffc3,
+    KB_KEY_F7        = 0xffc4,
+    KB_KEY_F8        = 0xffc5,
+    KB_KEY_F9        = 0xffc6,
+    KB_KEY_F10       = 0xffc7,
+    KB_KEY_F11       = 0xffc8,
+    KB_KEY_F12       = 0xffc9,
+};
+
+typedef struct {
+    uint32_t sym;    /* the key: a printable codepoint or one of KB_KEY_* */
+    unsigned mods;   /* KB_* bits that must ALL be held (at least one: see keybind_parse) */
+    int set;         /* 0 = the action is unbound (`key_new_tab = none`), 1 = bound */
+} KeyBind;
+
+/* Parse "Ctrl+Shift+T" (case-insensitive, modifiers in any order) into a KeyBind. Returns 1 when the
+   spec is usable, 0 when it is not (out is then left unbound, and the caller keeps the default).
+   A spec with NO modifier is refused on purpose: an unmodified binding would swallow plain typing.
+   `keybind_parse` requires exactly one key; keymods_parse (for the tab-prefix binding) requires
+   modifiers only. Both are pure string handling, so tests/test_vt.c can check them without a display. */
+int keybind_parse(const char *spec, KeyBind *out);
+int keymods_parse(const char *spec, unsigned *mods);
 
 /* ---------- config ---------- */
 typedef struct Config {
@@ -248,7 +324,7 @@ typedef struct Config {
     /* 1 = releasing the selection drag copies to the clipboard (the old behaviour).
        Default 0: selecting only SELECTS, the user copies with Ctrl+Shift+C. */
     int  copy_on_release;
-    /* K-Term drives its own key repeat. repeat_delay = milliseconds a key must be
+    /* Kai-Term drives its own key repeat. repeat_delay = milliseconds a key must be
        held before it starts repeating (default 300; 0 = leave repeat to the compositor, which is the
        behaviour before client-side repeat existed and the escape hatch if the timings ever get in the
        way). repeat_rate = repeats per second once it starts. */
@@ -259,6 +335,23 @@ typedef struct Config {
        touches the window edge (the layout before this setting existed). The pixels left over after
        whole cells still belong to the bottom/right, so the bottom margin is padding + remainder. */
     int  padding;
+    /* Multiplexing: one window hosts up to max_tabs terminal sessions (tabs), each with its own
+       shell, grid, scrollback and selection; only one is visible. The four bindings below are what
+       drive it, and tab_prefix_mods + a digit 1-9 jumps to that tab. All of them are config strings
+       such as "Ctrl+Shift+T"; see keybind_parse. */
+    int  max_tabs;
+    KeyBind key_new_tab;
+    KeyBind key_close_tab;
+    KeyBind key_next_tab;
+    KeyBind key_prev_tab;
+    unsigned tab_prefix_mods;   /* 0 = the digit shortcut is disabled */
+    /* How the sessions of this window are SHOWN (see the layout section below): the tab bar and the
+       tab/side-by-side toggle. tab_bar is BAR_OFF/BAR_AUTO/BAR_ALWAYS (AUTO = shown from the second
+       session on, so a single-session user sees no bar at all), split_max caps how many sessions are
+       drawn side by side, and key_toggle_layout swaps the two views. */
+    int  tab_bar;
+    int  split_max;
+    KeyBind key_toggle_layout;
     int  loglevel;
 } Config;
 
@@ -277,6 +370,142 @@ typedef struct Pty {
 int  pty_spawn(Pty *p, const char *cmd, int rows, int cols, const char *dir);
 void pty_setsize(Pty *p, int rows, int cols);
 void pty_write(Pty *p, const void *buf, size_t len);
+
+/* ---------- multiplexing: several terminal sessions in one window (src/mux.c) ---------- */
+
+#define TAB_MAX 64          /* hard ceiling; Config.max_tabs is clamped to 1..TAB_MAX */
+
+/* One multiplexed session. `term` is its whole screen state (grid, scrollback, selection, alt
+   screen), `pty` its shell. The FILE DESCRIPTORS and the child process belong to src/main.c: mux
+   never opens, closes, spawns or reaps anything — it owns the Tab array, the active index, the
+   per-tab attention flag and the Term lifetime (term_init on open, term_destroy on close). */
+typedef struct Tab {
+    Term term;
+    Pty  pty;
+    /* Output arrived while this tab was NOT the visible one. Cleared when the tab becomes visible. Both
+       the tab bar (a leading * in its label) and mux_title() report it, so a session that finished a build
+       while hidden is findable. src/main.c only sets it for a session that is NOT drawn at all — a pane the
+       user can see needs no mark. */
+    int  attention;
+} Tab;
+
+typedef struct Mux {
+    Tab tab[TAB_MAX];
+    int n;         /* tabs in use, dense from index 0 (closing shifts the later ones down) */
+    int active;    /* the visible tab; -1 when n == 0 */
+    int max;       /* Config.max_tabs, clamped to 1..TAB_MAX by mux_init */
+} Mux;
+
+void mux_init(Mux *m, int max_tabs);
+/* Open a tab: term_init only, the caller spawns the PTY and fills the blank cells. The new tab
+   becomes the visible one. Returns its index, or -1 when max_tabs is already reached. */
+int  mux_open(Mux *m, int rows, int cols, int scrollback);
+/* Close tab idx (term_destroy) and shift the later tabs down so the array stays dense. Returns the
+   new active index, or -1 when the last tab is gone — the caller must then quit. The caller owns the
+   PTY: capture the Pty BEFORE closing the tab (the shift moves it) and close/reap it separately. */
+int  mux_close(Mux *m, int idx);
+int  mux_goto(Mux *m, int idx);   /* clamped to the tabs that exist; returns the active index */
+int  mux_next(Mux *m);            /* wrap-around; -1 when there is no tab */
+int  mux_prev(Mux *m);
+Tab *mux_cur(Mux *m);             /* the visible tab, NULL when there is none */
+int  mux_count(const Mux *m);
+int  mux_active(const Mux *m);
+/* Note output on a hidden tab (ignored for the visible one). Returns 1 when that newly SET the flag,
+   so a caller can update the window title once instead of on every PTY read. */
+int  mux_touch(Mux *m, int idx);
+/* Window title text — what a compositor or a taskbar shows (the tab bar carries the same state inside the
+   window). One tab -> DEF_TITLE exactly, so a single-session user sees no change; several ->
+   "Kai-Term [2/3]", with "!" appended when a hidden session has output the user has not looked at yet. */
+void mux_title(const Mux *m, char *out, size_t cap);
+
+/* ---------- layout: where each session is drawn (src/layout.c) ----------
+   Pure geometry, no Wayland/EGL/fd, so the whole tab-bar/split feature is unit-testable
+   (tests/test_vt.c links it). It is the single place that decides how the window's pixels are shared:
+   the tab-bar strip, one rect per tab item (with its label text), and one rect per visible session
+   (pane) together with the cols/rows that fit inside it. main.c resizes every displayed session to its
+   pane and maps the pointer through that pane's origin; render.c draws exactly what this says. One
+   place decides it, because the drawn cell, the click -> cell mapping and the PTY size must agree —
+   the same reason term_grid_geometry() exists (see its comment). */
+
+enum { LAYOUT_TABS = 0, LAYOUT_SPLIT = 1 };
+
+/* tab_bar config value. BAR_AUTO is the default: no bar at all while there is one session (a
+   single-session window looks exactly like it did before multiplexing existed), the bar appears with the
+   second session. BAR_ALWAYS shows it even with one, BAR_OFF never (then the window title and the
+   keyboard bindings are the only way to see/switch sessions). */
+enum { BAR_OFF = 0, BAR_AUTO = 1, BAR_ALWAYS = 2 };
+
+#define BAR_LABEL_MAX 40    /* bytes of label text per tab item (UTF-8, cut at a codepoint edge) */
+
+/* One session's box. x/y/w/h are window pixels (top-left origin, like the pointer events); cols/rows is
+   what term_grid_geometry() says fits inside it, so the leftover pixels sit at the pane's right/bottom
+   exactly like they do at the window's — that is what keeps `col = (ptr_x - pane.x) / cell_w` exact. */
+typedef struct {
+    int x, y, w, h;
+    int cols, rows;
+    int tab;           /* the mux index this pane shows */
+} PaneGeom;
+
+/* One tab-bar item: a rect inside the bar strip plus the text drawn in it. */
+typedef struct {
+    int x, w;          /* px inside the window (the strip is one cell row tall) */
+    int tab;           /* the mux index this item selects */
+    int active;        /* 1 = the session the keyboard talks to (drawn highlighted) */
+    int attention;     /* 1 = unread output while hidden (drawn as a leading *) */
+    char label[BAR_LABEL_MAX];
+} BarItem;
+
+typedef struct {
+    int mode;          /* LAYOUT_TABS / LAYOUT_SPLIT */
+    int bar_on;
+    int active_tab;    /* the session the keyboard talks to (-1 when there is none): the highlighted
+                          item, and the pane the focus border is drawn around */
+    int bar_x, bar_y, bar_w, bar_h;   /* the strip itself, window px */
+    int nitem;
+    BarItem item[TAB_MAX];
+    int npane;
+    PaneGeom pane[TAB_MAX];
+} Layout;
+
+/* What the caller knows; layout_compute turns it into a Layout. */
+typedef struct {
+    int tab;           /* the mux index */
+    int attention;     /* Tab.attention */
+    const char *title; /* Term.title (OSC 0/2), may be empty or NULL */
+} TabInfo;
+
+typedef struct {
+    int mode;
+    int win_w, win_h;  /* buffer px */
+    int cell_w, cell_h;
+    int pad;           /* Config.padding: the margin around EVERYTHING, all four sides */
+    int gap;           /* px between panes, and between the bar and the grid */
+    int ntab, active;
+    int split_max;     /* panes side by side at most (>= 1) */
+    int bar;           /* BAR_OFF / BAR_AUTO / BAR_ALWAYS */
+    TabInfo tab[TAB_MAX];
+} LayoutReq;
+
+void layout_compute(const LayoutReq *rq, Layout *out);
+/* Hit tests in window px. Both return an INDEX INTO THE LAYOUT ARRAY (not a tab index), -1 when the
+   point is in the margin, the gap or outside. */
+int layout_hit_bar(const Layout *l, int px, int py);
+int layout_hit_pane(const Layout *l, int px, int py);
+/* -1 when that session is not drawn in this layout (a hidden tab in tab mode, or a session outside the
+   visible pane window in split mode). */
+int layout_pane_of_tab(const Layout *l, int tab);
+/* The grid size EVERY session of this layout gets, drawn or not. layout_compute gives every pane the same
+   height and, in split mode, the same width, so one size describes them all — and that is what lets main.c
+   resize a session that is NOT on screen to the size its pane will have, so switching to it never triggers
+   a resize (no SIGWINCH storm, no reflow on every tab switch). 0/0 when the layout has no pane at all. */
+void layout_grid_size(const Layout *l, int *cols, int *rows);
+/* The window size to ASK the compositor for so that a `cols` x `rows` session really fits, bar included.
+   It is the exact inverse of layout_compute() for the startup case, and it belongs here rather than in
+   main.c for the same reason the rest of the geometry does: the bar's height is one cell ROW (cell_h), and
+   writing cell_w there instead leaves the grid one row short of the configured `rows` for every non-square
+   cell — a mistake a check in tests/test_vt.c catches only if the arithmetic is in a module the tests link. */
+void layout_initial_size(int cols, int rows, int cell_w, int cell_h, int pad, int gap, int bar,
+                         int *win_w, int *win_h);
 
 /* ---------- font / glyph atlas ---------- */
 typedef struct Glyph {
@@ -365,11 +594,9 @@ typedef struct Render {
     float *edata;                /* CPU staging: expanded per-vertex data (fallback only) */
     int ecap;
     int vw, vh;                  /* buffer size in px */
-    /* Where the grid starts inside the buffer, in px (the Config.padding margin). main.c computes it
-       with term_grid_geometry() — the SAME call it uses for cols/rows and for the pointer -> cell
-       mapping — and hands it over with render_set_origin(), so the quads and the pointer mapping can
-       never disagree. 0,0 is the old edge-to-edge layout. */
-    int gx, gy;
+    /* NOTE: there is no grid origin here any more. Since the tab bar / side-by-side layout the frame is
+       a list of rectangles (Layout in kai-term.h), each with its own origin, so main.c passes them per
+       frame instead of setting one global offset. */
     int u_mvp, u_atlas, u_catlas, u_sel;
     void *set_div;               /* glVertexAttribDivisorARB or NULL */
     void *draw_inst;             /* glDrawArraysInstancedARB or NULL */
@@ -377,15 +604,22 @@ typedef struct Render {
     float opacity;               /* window background alpha 0..1 (from Config.opacity) */
     uint32_t bg;                 /* configured background ARGB, used to clear the buffer so the
                                     Config.padding margin matches the cell backgrounds */
+    uint32_t fg;                 /* configured foreground ARGB: the tab bar's text colour, and the base
+                                    the inactive item / separator colours are mixed from. Chrome colours
+                                    come from the CONFIG, never from a cell's pen — an application can
+                                    repaint its own cells but not the bar that names its tab. */
     void *ecfg;                  /* EGLConfig */
     void *nwin;                  /* EGLNativeWindowType (wl_egl_window) */
 } Render;
 
 int  render_init(Render *r, void *wl_display, void *egl_window, int w, int h, float opacity,
-                 uint32_t bg);
-int render_draw(Render *r, Term *t, Font *f);   /* 1 = a new buffer was attached, 0 = swap failed */
+                 uint32_t bg, uint32_t fg);
+/* Draw one frame: the tab bar (if the layout says so) plus every pane's grid, in one draw call.
+   `lay` comes from layout_compute() and carries every rectangle; `terms` is indexed by TAB index, so the
+   grid of pane p is terms[lay->pane[p].tab] (NULL draws an empty pane). Returns 1 when a new buffer was
+   attached, 0 when the swap failed. */
+int render_draw(Render *r, Font *f, const Layout *lay, Term *const *terms);
 void render_resize(Render *r, int w, int h);
-void render_set_origin(Render *r, int gx, int gy);   /* grid offset in buffer px (see Render.gx) */
 void render_destroy(Render *r);
 
 /* ---------- misc utils ---------- */
@@ -397,4 +631,4 @@ static inline int iclamp_(int v, int lo, int hi) { return v < lo ? lo : (v > hi 
 static inline float fclamp_(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 int  utf8_encode(uint32_t cp, char *out);   /* returns length */
 
-#endif /* K_TERM_H */
+#endif /* KAI_TERM_H */
