@@ -628,12 +628,12 @@ problem with a reproduction.
 
 ## Next Steps
 
-1. **Image support is done and confirmed by eye** (2026-10-17). The one open design question, only if the
-   user raises it: plain `timg <png>` deliberately draws block characters, because timg picks a graphics
-   protocol only for `TERM=xterm-kitty|xterm-ghostty` (kitty) or for a DA1 answer containing `;4` (sixel).
-   The honest way to make plain `timg` produce a real picture is **implementing sixel**. **Do not put
-   `4`/`16`/`18` back into the DA1 answer without implementing sixel**: that combination is what made the
-   picture disappear entirely (measured A/B, s70).
+1. **Image support is done and confirmed by eye** (2026-10-17), and the user has settled its scope:
+   "The goal was image support, Not auto-detection by timg so it work fine using `-p k`". So `-p k` IS the
+   supported way to show a picture and nothing more is wanted here. Do NOT "improve" this by re-adding the
+   graphics bits (4/16/18) to the DA1 answer or by inventing a `TERM` value: measured A/B (s70), advertising
+   sixel without implementing it makes the picture vanish entirely, and timg's auto-detect list is hardcoded
+   in its binary. Sixel/iTerm2 support would be a NEW feature — only on an explicit request.
 2. **No open bugs.** ISSUES.md "Open" is empty. If a dropped report recurs, file it with a reproduction and
    start from scratch — for second-instance crash: source + headless harness, not screen. Old wording of
    those 4 reports: `git show d5afe4a:ISSUES.md`.
