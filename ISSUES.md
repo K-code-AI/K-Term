@@ -11,9 +11,9 @@ The rules those bugs produced are in AGENT.md "Architecture & Invariants" — re
 MODEL OK with no AddressSanitizer/UBSan/LeakSanitizer report; no `TODO`/`FIXME`/`XXX` anywhere in
 `src/`, `include/`, `tests/`.
 
-Not a bug but not confirmed by eye either: the image protocol is tested at the model level (parser,
-chunking, decode, placement, lifetime), while the GL drawing of a picture in a real window has not
-been looked at by a human yet. The check is `timg -p k <file.png>` — see README "Images".
+Image support is confirmed by eye in the user's window (`timg -p k <file.png>`, 2026-10-17) as well as by
+the model tests and the `graphics: N image(s) drawn` log line. Its limits are listed under
+"Known limitations" — "Graphics / images".
 
 To file a problem: symptom, exact reproduction, and what `./bin/kai-term -d` logs. Not reproducible ->
 not filed; it is not a bug until it reproduces.

@@ -22,13 +22,13 @@ multiplexing: N sessions per window, tab bar, side-by-side panes. No GUI framewo
 - Clean tree: `make` exit 0, **0 warnings** under `WARN` (`-Wall -Wextra -Wshadow -Wwrite-strings
   -Wformat=2 -Wdiscarded-qualifiers`). `make test` -> **553 checks, 0 failures** + **MODEL OK (0 problems)** +
   **CLI: 86 checks, 0 failures, 0 skipped**. `make asan` -> 553/0 + MODEL OK, no LeakSanitizer/UBSan report.
-- **Image support (kitty graphics protocol) is in the tree**: APC/DCS parser states, chunk assembly,
-  base64 + zlib + PNG (libpng simplified API) + raw f=24/32 decode, premultiplied pixels held in the
-  model, images anchored to absolute grid rows, winsize pixel geometry + `CSI 14 t`/`CSI 16 t`, and a
-  renderer that draws each picture between the background batch and the text batch. Verified headless
-  (real timg bytes through the real parser) and live by log line (`graphics: 1 image(s) drawn, 1
-  texture(s) held`, no GL warning) — **not yet confirmed by eye in the window**; the check is
-  `timg -p k <file.png>`.
+- **Image support (kitty graphics protocol) is in the tree and user-confirmed by eye** ("The image display
+  properly. The feature works as expected", 2026-10-17, session 70, `timg -p k` with a PNG): APC/DCS parser
+  states, chunk assembly, base64 + zlib + PNG (libpng simplified API) + raw f=24/32 decode, premultiplied
+  pixels held in the model, images anchored to absolute grid rows, winsize pixel geometry +
+  `CSI 14 t`/`CSI 16 t`, and a renderer that draws each picture between the background batch and the text
+  batch. Also verified headless (real timg bytes through the real parser) and by log line
+  (`graphics: 1 image(s) drawn, 1 texture(s) held`, no GL warning).
 - No probe/experiment left in tree: `grep -rnE "TEMPORARY|PROBE|EXPERIMENT|NEGATIVE" src/ include/ tests/` ->
   empty.
 - README flag table (`-e -w -c -d -v -h`) + 27 settings rows match `src/main.c` / `src/config.c`.
@@ -37,7 +37,8 @@ multiplexing: N sessions per window, tab bar, side-by-side panes. No GUI framewo
   are not in "Fixed" either, since no fix was ever verified. Recoverable with `git show d5afe4a:ISSUES.md`;
   recurrence -> file a new Open item with a reproduction.
 - **User-confirmed by eye in their window:** multiplexing + tab bar + side-by-side ("works as expected and
-  looks great", 2026-10-17); zoom (no stale prompt lines), padding, fullscreen refresh, black-window/no-input
+  looks great", 2026-10-17); image display via `timg -p k` ("the image display properly. The feature works
+  as expected", 2026-10-17); zoom (no stale prompt lines), padding, fullscreen refresh, black-window/no-input
   fix, heavy-output segfault fix, transparency, bracketed paste, `clear` drops scrollback, shell start dir,
   color emoji, text selection, `app_id`, several instances at once, window resize, key-hold repeat, clipboard
   interop both directions.
@@ -50,9 +51,9 @@ multiplexing: N sessions per window, tab bar, side-by-side panes. No GUI framewo
   `git log --oneline origin/main -1`. `git fetch` before push — user commits on GitHub too. Never commit
   `bin/` or `build/`.
 
-## Current Task (s70 — IN PROGRESS: finish image support docs + verify + commit)
+## Current Task (s70 — CLOSED: image support done, user-confirmed by eye)
 
-**s70 objective:** close out the image-support work (s68 model/parser + s69 renderer/tests). What is
+**s70 objective:** close out the image-support work (s68 model/parser + s69 renderer/tests). What was
 left per the s69 entry: README (feature entry + libpng/zlib in Requirements), ISSUES.md limitations,
 a clean-tree re-verification of build/test/asan, a commit, and a live `timg` run for the user to
 confirm by eye.
@@ -111,20 +112,23 @@ cursor. Anything that does not behave gets dropped from the README or moved to I
 `graphics: 0 image(s) drawn, 0 texture(s) held` -> `graphics: 1 image(s) drawn, 1 texture(s) held`, no
 GL warning, clean exit (`the last session is gone, exiting`). So the picture really went through decode
 -> texture -> draw on the real NVIDIA/GL 4.6 context; whether it LOOKS right (aspect, position, text on
-top) still needs the user's eyes.
+top) was still open at that point — closed by the user's verdict below.
 
 **s70 remote synced:** `git fetch` first — nothing on GitHub to integrate, so `git push origin main` was a
 fast-forward (exit 0). Re-fetched: `main` == `origin/main`, `git status -sb` shows no ahead/behind marker.
 Read the truth with `git status -sb` / `git log --oneline origin/main -1` — the commit recording this line
 is itself pushed.
 
+**s70 CLOSED — user confirmation received:** "The image display properly. The feature works as expected"
+(2026-10-17, their own window, `timg -p k` on a PNG). So the picture, its aspect, its placement at the
+cursor and the text over it are confirmed by eye, not only by log line. Nothing about the feature is
+open; the remaining limits are the documented ones in ISSUES.md "Graphics / images" (no sixel/iTerm2,
+no crop/file/animation actions, one background per picture, raw-format `s=` unverified).
+
 **s70 STATE at session close:** image support (s68 model + s69 renderer/tests + s70 fixes and docs) is
-implemented, documented (README "Images", ISSUES.md "Graphics / images") and committed — read the hash
-with `git log --oneline -1`, not from here. The visual
-confirmation is the user's, and the exact command to give them is
-`timg -p k <some.png>` (plain `timg <png>` deliberately falls back to block characters — see the
-auto-detect measurement above). If they report a wrong aspect, a wrong position or text hidden under a
-picture, start from the `-d` line `graphics: N image(s) drawn` and the span math in
+implemented, documented (README "Images", ISSUES.md "Graphics / images"), committed and pushed — read the
+hash with `git log --oneline -1`, not from here. If a picture ever looks wrong (aspect, position, text
+under it), start from the `-d` line `graphics: N image(s) drawn` and the span math in
 `image_span_rows/cols`, not from the shader.
 
 **s70 DONE — three source fixes, each measured, tests 542 -> 553.**
@@ -382,8 +386,8 @@ failures + MODEL OK (0 problems) + CLI 86 checks 0 failures 0 skipped; `make asa
   figure came from reading CBLC's `bitmapSize` (a byte count) as a pixel size; ENVIRONMENT.md carried it and
   has been corrected.
 
-NEXT ACTION: ask the user to look at `timg -p k <png>` and report; then pick from "Next Steps"
-(housekeeping — no bug is open), or file a problem with a reproduction.
+NEXT ACTION: pick from "Next Steps" (housekeeping — no bug is open, image support is confirmed), or file a
+problem with a reproduction.
 
 ## Progress Journal (root causes of fixed bugs: git history)
 
@@ -611,19 +615,25 @@ NEXT ACTION: ask the user to look at `timg -p k <png>` and report; then pick fro
   image (4 pictures -> 2, `version` bumped). Tests 542 -> 553, all green, `make asan` clean; README gained a
   verified "Images" section (libpng/zlib in Requirements, `timg -p k`, no false auto-detect claim) and
   ISSUES.md a "Graphics / images" limitations group. Live log evidence the renderer path runs:
-  `graphics: 1 image(s) drawn, 1 texture(s) held`, no GL warning. Visual confirmation is still the user's.
+  `graphics: 1 image(s) drawn, 1 texture(s) held`, no GL warning. Visual confirmation was still pending
+  then (closed below).
   Rule this session produced: **a documented example is a claim — run it before writing it.** Two of the
   three README examples I drafted were wrong (`--grid=RxC` arranges multiple FILES, not tiles of one image;
   `-V` does not animate in place because timg moves the cursor per frame).
+  CLOSED by the user's own verdict in their window: "The image display properly. The feature works as
+  expected" — image display is now user-confirmed by eye, joining the other visually confirmed features in
+  Current Status. AGENT.md Current Status / Current Task / Next Steps and the ISSUES.md "Open" note were
+  updated to say confirmed rather than pending; no source change, so no rebuild was needed (the tree that
+  was verified in s70 is the tree that is on `main`).
 
 ## Next Steps
 
-1. **Image support awaits the user's eye.** Everything measurable here is measured (see s70); what is
-   missing is "does the picture look right in the window". Ask them to run `timg -p k <png>` (a test image
-   is in `/home/kaida/Project/.scratch/s70/big.png`). If they want plain `timg <png>` to produce a real
-   picture instead of block characters, the only honest route is implementing sixel — timg picks sixel
-   exactly when the DA1 answer contains `;4` (measured). **Do not put `4`/`16`/`18` back into the DA1
-   answer without implementing sixel**: that combination is what made the picture disappear entirely.
+1. **Image support is done and confirmed by eye** (2026-10-17). The one open design question, only if the
+   user raises it: plain `timg <png>` deliberately draws block characters, because timg picks a graphics
+   protocol only for `TERM=xterm-kitty|xterm-ghostty` (kitty) or for a DA1 answer containing `;4` (sixel).
+   The honest way to make plain `timg` produce a real picture is **implementing sixel**. **Do not put
+   `4`/`16`/`18` back into the DA1 answer without implementing sixel**: that combination is what made the
+   picture disappear entirely (measured A/B, s70).
 2. **No open bugs.** ISSUES.md "Open" is empty. If a dropped report recurs, file it with a reproduction and
    start from scratch — for second-instance crash: source + headless harness, not screen. Old wording of
    those 4 reports: `git show d5afe4a:ISSUES.md`.
