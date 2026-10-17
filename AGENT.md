@@ -17,17 +17,20 @@ rendering, 2 glyph atlases (alpha8 mono, RGBA8 color emoji) plus one GL texture 
 (kitty graphics protocol), two vertex batches per frame with the pictures drawn between them. In-window
 multiplexing: N sessions per window, tab bar, side-by-side panes. No GUI framework.
 
-## Current Status (re-verified 2026-10-18, session 74 — the file manager is BUILT, WIRED and GREEN; it has never been seen by a human and README/ISSUES.md do not mention it)
+## Current Status (re-verified 2026-10-18, session 74 — the file manager is BUILT, WIRED, DOCUMENTED and COMMITTED; the only open item is the user's eye on it)
 
 - `make clean && make` exit 0, **0 warnings** under `WARN` (`-Wall -Wextra -Wshadow -Wwrite-strings
   -Wformat=2 -Wdiscarded-qualifiers`). `make test` -> exit 0: `CLI: 92 checks, 0 failures, 0 skipped`,
   `./bin/test_vt` **613 checks, 0 failures**, `./bin/dbg` **MODEL OK (0 problems)**, `./bin/test_fm`
   **220 checks, 0 failures**. `make asan` -> exit 0, 613/0 + MODEL OK + 220/0, no sanitizer report.
-- Uncommitted work in the tree: `src/img.c` (new), `src/fm.c` (new), `tests/test_fm.c` (new), plus modified
-  `Makefile`, `include/kai-term/kai-term.h`, `src/vt.c`, `src/layout.c`, `src/config.c`, `src/render.c`,
-  `src/main.c`, `tests/test_vt.c`, `tests/cli_test.sh`, `AGENT.md`. The file manager IS reachable from the
-  UI (`Ctrl+Shift+F`) and its band is drawn — but no human has looked at it, and the interactive routing
-  (FM keys, focus handover, mouse) has never been exercised outside the model tests.
+- The whole feature is committed and pushed — `src/img.c`, `src/fm.c`, `tests/test_fm.c` (new) and the
+  `Makefile`, `include/kai-term/kai-term.h`, `src/{config,layout,main,render,vt}.c`,
+  `tests/{test_vt.c,cli_test.sh}`, `README.md`, `ISSUES.md`, `AGENT.md` changes. `git status -sb` shows a
+  clean tree; read the remote state with `git status -sb` / `git log --oneline origin/main -1`.
+- The file manager IS reachable from the UI (`Ctrl+Shift+F`) and its band is drawn. Its input routing
+  (toggle, band keys, focus handover, `cd` follow, close/reopen) was verified live by injecting keys through
+  niri and reading the bytes the PTY received — three real defects found and fixed that way (s74 entries
+  2-4). **No human has seen how it looks yet**; that verdict is the user's and is the one open item.
 - **Image support (kitty graphics protocol) is in the tree and user-confirmed by eye** ("The image display
   properly. The feature works as expected", 2026-10-17, session 70, `timg -p k` with a PNG): APC/DCS parser
   states, chunk assembly, base64 + zlib + PNG (libpng simplified API) + raw f=24/32 decode, premultiplied
@@ -37,14 +40,14 @@ multiplexing: N sessions per window, tab bar, side-by-side panes. No GUI framewo
   (`graphics: 1 image(s) drawn, 1 texture(s) held`, no GL warning).
 - No probe/experiment left in tree: `grep -rnE "TEMPORARY|PROBE|EXPERIMENT|NEGATIVE" src/ include/ tests/` ->
   empty.
-- README flag table (`-e -w -c -d -v -h`) + 27 settings rows match `src/main.c` / `src/config.c` — but README
-  does NOT yet mention the file manager or the libjpeg/libwebp dependencies `src/img.c` now links, and
-  `Makefile`'s `PKG` already lists them. Docs lag the tree while the feature is unfinished.
-- **No open issues** in the shipped sense (the terminal itself), but `make test` is red on the new fm tests,
-  which is tracked in the s72 entry below, not filed as a user-facing bug. The 4 reports that used to be
-  there were unproven (never reproduced here) and were dropped from ISSUES.md entirely on 2026-10-17 — they
-  are not in "Fixed" either, since no fix was ever verified. Recoverable with `git show d5afe4a:ISSUES.md`;
-  recurrence -> file a new Open item with a reproduction.
+- README flag table (`-e -w -c -d -v -h`) and its **47** settings rows match `src/main.c` / `src/config.c`
+  exactly — checked by set difference, not by eye: the 47 keys `apply()` in `src/config.c` handles (`font`
+  plus 46 `else if` branches) and the 47 rows of the "Available settings" table are the same set. README
+  now also has a "File manager" usage section, the 20 file-manager settings rows, the shortcut tables, and
+  libjpeg + libwebp in Requirements.
+- **No open issues.** The 4 reports that used to be in ISSUES.md were unproven (never reproduced here) and
+  were dropped entirely on 2026-10-17 — they are not in "Fixed" either, since no fix was ever verified.
+  Recoverable with `git show d5afe4a:ISSUES.md`; recurrence -> file a new Open item with a reproduction.
 - **User-confirmed by eye in their window:** multiplexing + tab bar + side-by-side ("works as expected and
   looks great", 2026-10-17); image display via `timg -p k` ("the image display properly. The feature works
   as expected", 2026-10-17); zoom (no stale prompt lines), padding, fullscreen refresh, black-window/no-input
@@ -837,6 +840,24 @@ say; until then ISSUES.md "Open" and AGENT.md Current Status both say so explici
 **Next action:** give the user the live command (`./bin/kai-term -d`, `Ctrl+Shift+F`), record their verdict,
 then `git fetch` + push. If they report anything about how it looks, start from the `fm:` log lines listed
 under "Debugging this project", not from the shader.
+
+**Remote synced:** `git fetch origin` first — 0 behind, nothing on GitHub to integrate — so the push was a
+fast-forward. Re-fetched and verified `main` == `origin/main` (no ahead/behind marker). Read the truth with
+`git status -sb` / `git log --oneline origin/main -1`; the commit recording this line is itself pushed.
+
+### s74 entry 9 — swept the remaining stale status lines out of AGENT.md
+
+Three bullets in Current Status still described the pre-s74 tree ("README does NOT yet mention the file
+manager", "`make test` is red on the new fm tests", "27 settings rows"). Replaced with measured facts:
+- The settings-table claim is now checkable rather than eyeballed: `diff` of the 47 keys `apply()` in
+  `src/config.c` handles (`font` at the top of the chain plus 46 `else if` branches) against the 47 rows of
+  README's "Available settings" table -> **the same set, no difference either way**.
+- "`make test` is red" removed — it has been green since s72 entry 2, and the bullet contradicted the
+  counts three lines above it.
+- "Uncommitted work in the tree" replaced with "committed and pushed", with no hash and no ahead-count
+  (the commit recording it makes those wrong; the rule is to read `git status -sb`).
+
+**Next action:** the user's live run. Everything the code side can prove is proven and recorded.
 
 (Previous task, s70 — image support close-out; its entry follows.)
 
