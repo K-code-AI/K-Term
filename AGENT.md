@@ -44,7 +44,7 @@ multiplexing: N sessions per window, tab bar, side-by-side panes. No GUI framewo
 - Verified at model+live level (not all re-checked by hand): reflow on width change, color emoji + grapheme
   clusters, whole-glyph selection with no band over unwritten space, compositor transparency, CSI 3 J +
   startup dir, client-side key repeat, draw/commit + event-loop pacing.
-- Git: `origin = https://github.com/K-code-AI/Kai-Term`, branch `main`. As of s67 close **everything on main
+- Git: `origin = https://github.com/K-code-AI/Kai-Term`, branch `main`. As of s70 close **everything on main
   is pushed** (`main` == `origin/main`, 0 behind / 0 ahead, empty `git diff`). Do not write a hash or an
   ahead-count here — the commit recording it makes it wrong. Read the truth with `git status -sb` and
   `git log --oneline origin/main -1`. `git fetch` before push — user commits on GitHub too. Never commit
@@ -112,6 +112,11 @@ cursor. Anything that does not behave gets dropped from the README or moved to I
 GL warning, clean exit (`the last session is gone, exiting`). So the picture really went through decode
 -> texture -> draw on the real NVIDIA/GL 4.6 context; whether it LOOKS right (aspect, position, text on
 top) still needs the user's eyes.
+
+**s70 remote synced:** `git fetch` first — nothing on GitHub to integrate, so `git push origin main` was a
+fast-forward (exit 0). Re-fetched: `main` == `origin/main`, `git status -sb` shows no ahead/behind marker.
+Read the truth with `git status -sb` / `git log --oneline origin/main -1` — the commit recording this line
+is itself pushed.
 
 **s70 STATE at session close:** image support (s68 model + s69 renderer/tests + s70 fixes and docs) is
 implemented, documented (README "Images", ISSUES.md "Graphics / images") and committed — read the hash
