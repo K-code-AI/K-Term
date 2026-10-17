@@ -168,6 +168,19 @@ if [ "$have_display" = 1 ]; then
     run -d -e true
     ck "$(printf '%s\n' "$out" | grep -c 'layout: tab view, 1 pane, tab bar off, grid')" 1 "tab_bar = auto (the default) shows no bar with one session"
 
+    # the in-window file manager: its config keys must be known, and its bindings must be unbindable.
+    # Off by default, so the plain run above must not mention a file manager at all.
+    printf 'file_manager = on\nfm_rows = 8\nfm_preview = off\nfm_show_hidden = on\nfm_follow = off\nkey_file_manager = Alt+F\nkey_fm_focus = none\nfm_key_up = k\nfm_key_down = j\nfm_key_open = none\n' > "$tmp/fmconf"
+    run -c "$tmp/fmconf" -d -e true
+    ck "$rc" 0 "a config with the file manager keys runs"
+    ck "$(printf '%s\n' "$out" | grep -c 'unknown key')" 0 "the file manager config keys are known"
+    ck "$(printf '%s\n' "$out" | grep -c 'config: key_fm_focus unbound')" 1 "key_fm_focus = none unbinds the focus switch"
+    ck "$(printf '%s\n' "$out" | grep -c 'config: fm_key_open unbound')" 1 "fm_key_open = none unbinds that key"
+    run -c "$tmp/fmconf" -d -e true
+    ck "$(printf '%s\n' "$out" | grep -c 'config: fm_key_up unbound')" 0 "fm_key_up = k is a binding, not an unbind"
+    run -d -e true
+    ck "$(printf '%s\n' "$out" | grep -c 'file manager')" 0 "the file manager is off by default: the layout line does not mention it"
+
     # everything at once
     run -c "$tmp/conf" -d -w "$tmp" -e true
     ck "$rc" 0 "combined -c -d -w -e runs"
@@ -175,7 +188,7 @@ if [ "$have_display" = 1 ]; then
     ck "$(printf '%s\n' "$out" | grep -c "shell starts in $tmp")" 1 "combined: -w applied"
 else
     for name in "-c FILE" "--config FILE" "--config=FILE" "-d overrides log" "-w DIR" "-e COMMAND" \
-                "multiplexing keys" "display keys (tab_bar/split_max)" "combined flags"; do
+                "multiplexing keys" "display keys (tab_bar/split_max)" "file manager keys" "combined flags"; do
         skip "$name" "no WAYLAND_DISPLAY"
     done
 fi

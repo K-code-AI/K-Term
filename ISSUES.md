@@ -6,10 +6,15 @@ The rules those bugs produced are in AGENT.md "Architecture & Invariants" — re
 
 ## Open
 
-**None.** Verified 2026-10-17 from a clean tree: `make` exit 0 with 0 warnings; `make test` -> 553 checks
-0 failures + `MODEL OK (0 problems)` + `CLI: 86 checks, 0 failures, 0 skipped`; `make asan` -> 553/0 +
-MODEL OK with no AddressSanitizer/UBSan/LeakSanitizer report; no `TODO`/`FIXME`/`XXX` anywhere in
-`src/`, `include/`, `tests/`.
+**None.** Verified 2026-10-18 from a clean tree: `make` exit 0 with 0 warnings; `make test` -> `CLI: 92
+checks, 0 failures, 0 skipped` + 613 checks 0 failures + `MODEL OK (0 problems)` + 220 checks 0 failures;
+`make asan` -> 613/0 + MODEL OK + 220/0 with no AddressSanitizer/UBSan/LeakSanitizer report; no
+`TODO`/`FIXME`/`XXX` anywhere in `src/`, `include/`, `tests/`.
+
+The integrated file manager (README "File manager") is built, wired into the window and covered by 220
+model/layout/config checks; its input routing was verified live by injecting keys through the compositor and
+reading the bytes the PTY received. **Its appearance has not yet been confirmed by a human eye** — see the
+s74 journal entry in AGENT.md. Its limits are under "Known limitations" — "File manager".
 
 Image support is confirmed by eye in the user's window (`timg -p k <file.png>`, 2026-10-17) as well as by
 the model tests and the `graphics: N image(s) drawn` log line. Its limits are listed under
@@ -116,6 +121,49 @@ Not bugs — current behaviour, each re-checked against the source 2026-10-17. D
   animating in one place.
 - **A picture belongs to the screen it was placed on.** One placed on the alternate screen is drawn
   only while the alternate screen is active, and one from the main screen only while it is not.
+
+**File manager**
+
+- **The band costs the terminal rows, and the terminal wins.** `fm_rows` (3–64) is clamped in `layout.c`
+  so the shell keeps at least 3 rows; in a window too small for even that, the band is dropped for that
+  frame and the terminal gets the whole grid area back — the same rule the tab bar follows. `-d` shows it:
+  `grid resized to 154x51 …` with the band on in a window that is 154x61 without it.
+- **One browser per window, shared by every session in it.** The file manager does not follow the active
+  session's working directory, and it does not have one view per tab.
+- **The `cd` follow is one directory deep.** Kai-Term remembers the last directory it sent and does not
+  repeat it, so pressing the refresh key does not type a command at your prompt — but it also cannot know
+  about a `cd` you typed yourself. Navigating away and back to a directory sends the line again. It is
+  never sent to a session on the alternate screen (vim, htop, less would receive it as typing), and
+  switching session clears the memory so the newly visible shell is re-synced on the next navigation.
+- **Kai-Term never opens a file.** `Return` on a file types its quoted path at the prompt and stops there;
+  there is no "default application", no shell-out, and no confirmation dialog. Opening things is a decision
+  deliberately left to the user.
+- **Hard caps, so a huge directory or a huge file cannot stall or exhaust anything.** A listing keeps at
+  most 8192 entries (the footer says `(listing capped)`); a directory preview shows at most 512; a text
+  preview reads at most 256 KiB; an image preview reads at most 16 MiB of file and then meets the decoder's
+  own caps (4096 px per side, 16 Mpx). Over any of them the pane says so and shows metadata instead.
+  Directories and previews are read on a worker thread, so the UI never blocks — an answer about a
+  directory or file the user has already moved away from is dropped (`-d` logs
+  `fm: dropping stale listing/preview …`).
+- **The text preview is not a viewer.** It shows the file from the beginning: no scrolling, no search, no
+  line numbers, and a line longer than the pane is **cut at the right edge, not wrapped** (wrapping would
+  push the rest of the file off the pane). Highlighting is chosen from the file name — 13 languages — and
+  is a heuristic, not a parser.
+- **Only the first image of a file is decoded — and an animated WebP is not decoded at all.** An animated
+  GIF previews its first frame: the in-tree GIF decoder stops after the first image block, because later
+  frames are deltas over what was already drawn. An animated WebP fails libwebp's simple decode, so the
+  pane falls back to metadata with `webp file could not be decoded` (measured 2026-10-18 with
+  `.scratch/s74/animprobe` on 4-frame GIF and WebP files: GIF 20x20 decoded, WebP refused). Reading that
+  first frame would need `libwebpdemux`, which Kai-Term deliberately does not link.
+- **Sorting and columns are fixed.** Directories first, then case-insensitive by name (then by bytes, so
+  the order is total). No sort options, no tree view, no multi-select, and no rename / copy / move / delete
+  — the browser reads the filesystem and writes nothing to it.
+- **A click selects; it does not open.** One click moves the selection to the row under the pointer and
+  gives the browser the keyboard; entering a directory takes `Return`. There is no double-click.
+  The wheel over the band walks the listing instead of scrolling the terminal's history.
+- **The band is not part of the terminal's grid.** It is drawn from its own `Cell` arrays through the same
+  renderer passes, so it uses the same font, colours and wide-glyph rules — but the terminal's selection,
+  scrollback and mouse reporting do not reach it, and text in the preview pane cannot be selected.
 
 **Rendering / input**
 

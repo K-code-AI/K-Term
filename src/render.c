@@ -12,6 +12,11 @@
  * adds four quads for the focus border. A picture an application sent with the kitty graphics protocol
  * (see the graphics section of src/vt.c) adds one textured quad of its own.
  *
+ * With the file manager on, the band src/layout.c put above the terminal pane(s) adds TWO more Cell
+ * grids (the browser and the preview) drawn by the very same passes — fm.c paints ordinary Cells, so
+ * there is no second drawing path — plus one textured quad for the preview picture and a border around
+ * whichever region owns the keyboard.
+ *
  * A frame is TWO vertex batches plus one draw per visible picture, not one draw call: this renderer never
  * enables GL blending (see fs_src), so the only way to put a picture over the cell backgrounds but under
  * the text -- which is how the protocol's own terminal draws it -- is to draw it in between.
@@ -638,6 +643,104 @@ static uint32_t next_cp(const char **pp)
     return cp;
 }
 
+/* The glyph quad of one cell: the color emoji the color font has for the whole cluster, or the mono
+   glyph. Returns 1 when a quad was emitted. This is the code pass 3 used to carry inline; it is a
+   function now because the file-manager panes need exactly the same glyph handling (their cells can
+   hold any codepoint a file name contains, including emoji) and a second copy of the emoji/mono/wide
+   rules is how the two would drift apart.
+   fg/bg are already resolved by the caller (inverse, cursor, selection) and bg[3] already carries the
+   window opacity; ATTR_DIM is applied here so both callers dim identically. band0/band1 are the
+   selection band's absolute pixel edges (0 when there is none — the file manager has no selection). */
+static int emit_cell_glyph(Font *f, const Cell *c, float px, float py, float cw, float ch,
+                           float ascent, const float *fg, const float *bg,
+                           float band0, float band1, float **vp)
+{
+    /* Color emoji first: the cell's whole cluster (anchor + its continuation codepoints) is
+       shaped by HarfBuzz into ONE color glyph. When the color font has nothing for that
+       sequence we fall back to the mono glyph from the fontconfig fallback face (session 35),
+       so emoji still draw on a box with no color font. seq/nseq stay in scope for the whole
+       cell: the same sequence also decides the quad's span (cluster_is_wide below). */
+    uint32_t seq[CLUSTER_MAX + 1];
+    int nseq = 0;
+    ColorGlyph *cg = NULL;
+    if (f->color_ok && (c->nextra || cp_is_emoji(c->ch))) {
+        nseq = 1;
+        seq[0] = c->ch;
+        for (int k = 0; k < (int)c->nextra && nseq <= CLUSTER_MAX; k++)
+            seq[nseq++] = c->extra[k];
+        cg = font_color_glyph(f, seq, nseq);
+    }
+    Glyph *gl_ = NULL;
+    if (!cg) {
+        gl_ = font_glyph(f, c->ch);
+        if (!gl_ || gl_->w <= 0 || gl_->h <= 0)
+            return 0;
+    }
+
+    float cf[4];
+    cf[0] = fg[0]; cf[1] = fg[1]; cf[2] = fg[2]; cf[3] = fg[3];
+
+    if (cg) {
+        /* The color bitmap carries UNSCALED strike metrics, and f->color_px is that
+           strike's own pixel height as the font reports it (128 for the installed Noto
+           Color Emoji), so the scale factor is cell-height / strike-height: zooming
+           resizes the quad without ever re-rasterizing the emoji. An emoji fills its
+           cell box; a WIDE emoji gets the 2-cell span it reserved, so it is never
+           squished. */
+        float s = ch / (float)f->color_px;
+        float gw = (float)cg->w * s, gh = (float)cg->h * s;
+        /* The span is the WHOLE cluster's width, not just the base codepoint's: vt.c
+           reserved 2 cells for a wide cluster, including clusters whose wide (emoji)
+           presentation only appears once a modifier is folded in (U+2764 U+FE0F, the
+           keycaps, a regional-indicator pair). cluster_is_wide is the same predicate
+           vt.c used, so the quad always matches the reservation. */
+        float span = cluster_is_wide(seq, nseq) ? 2.0f * cw : cw;
+        if (gw > span) {
+            float k = span / gw;
+            gw *= k;
+            gh *= k;
+        }
+        float gx = px + (span - gw) * 0.5f;   /* centered in the cell span */
+        float gy = py + (ch - gh) * 0.5f;     /* centered in the line box */
+        cf[0] = cf[1] = cf[2] = 1.0f; cf[3] = 1.0f;   /* color, never fg-tinted */
+        if (c->attr & ATTR_DIM)
+            cf[0] = cf[1] = cf[2] = 0.5f;     /* shader scales the premul texel */
+        emit_quad(vp, gx, gy, gw, gh, cg->u0, cg->v0, cg->u1, cg->v1, cf, bg, 2.0f,
+                  band0, band1);
+        return 1;
+    }
+
+    float gw = (float)gl_->w * f->scale;
+    float gh = (float)gl_->h * f->scale;
+    float gx = px + (float)gl_->bearing_x * f->scale;
+    /* baseline: cell_top=py+ch; baseline=cell_top-ascent;
+       glyph_top=baseline+bearing_y*scale; quad_bottom=glyph_top-gh */
+    float gy = py + ch - ascent + (float)gl_->bearing_y * f->scale - gh;
+    if (c->attr & ATTR_DIM) {
+        cf[0] *= 0.5f; cf[1] *= 0.5f; cf[2] *= 0.5f;
+    }
+    emit_quad(vp, gx, gy, gw, gh, gl_->u0, gl_->v0, gl_->u1, gl_->v1, cf, bg, 1.0f,
+              band0, band1);
+    return 1;
+}
+
+/* A rectangular border `t` px thick, drawn just OUTSIDE the rect (in the gap around it), so it never
+   covers a glyph. Used for the side-by-side focus border and for the file-manager focus border. */
+static void emit_border(float **vp, float x, float y, float w, float h, float t,
+                        const float *bg, float du, float dv, float vh)
+{
+    const float white[4] = { 1, 1, 1, 1 };
+    float gl_bot = vh - (y + h), gl_top = vh - y;
+    emit_quad(vp, x - t, gl_top, w + 2.0f * t, t, du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f,
+              white, bg, 0.0f, 0.0f, 0.0f);
+    emit_quad(vp, x - t, gl_bot - t, w + 2.0f * t, t, du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f,
+              white, bg, 0.0f, 0.0f, 0.0f);
+    emit_quad(vp, x - t, gl_bot, t, h, du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f,
+              white, bg, 0.0f, 0.0f, 0.0f);
+    emit_quad(vp, x + w, gl_bot, t, h, du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f,
+              white, bg, 0.0f, 0.0f, 0.0f);
+}
+
 /* Everything one pane needs in all three passes, computed once per pane per frame. */
 typedef struct {
     Term *t;
@@ -763,7 +866,156 @@ static int draw_images(Render *r, Term *t, const PaneGeom *pg, const PaneDraw *p
     return drawn;
 }
 
-int render_draw(Render *r, Font *f, const Layout *lay, Term *const *terms)
+/* ---------- the file-manager band ---------- */
+
+/* One of the two band panes, in the shape the passes want. which: 0 = the browser, 1 = the preview.
+   Returns 0 when that pane is not part of this frame (band off, preview toggled away). */
+static int fm_pane_rect(const FmGeom *fg, int which, int *x, int *y, int *w, int *h)
+{
+    if (!fg->on)
+        return 0;
+    if (which == 0) {
+        *x = fg->list_x; *y = fg->list_y; *w = fg->list_w; *h = fg->list_h;
+        return fg->list_cols > 0 && fg->list_rows > 0;
+    }
+    if (!fg->prev_on)
+        return 0;
+    *x = fg->prev_x; *y = fg->prev_y; *w = fg->prev_w; *h = fg->prev_h;
+    return fg->prev_cols > 0 && fg->prev_rows > 0;
+}
+
+typedef struct {
+    const Cell *cell;
+    int stride;          /* the grid's own column count, which is what indexes cell[] */
+    int nrows, ncols;    /* clamped to what the rect can hold, exactly like pane_prepare() */
+    float gx;
+    float pad_gl;
+} FmPaneDraw;
+
+static void fm_pane_prepare(const Render *r, const FmPane *p, int x, int y, int w, int h,
+                            Font *f, FmPaneDraw *fp)
+{
+    float cw = (float)f->cell_w * f->scale;
+    float ch = (float)f->cell_h * f->scale;
+    int cwi = imax_((int)(cw + 0.5f), 1), chi = imax_((int)(ch + 0.5f), 1);
+    fp->cell = p->cell;
+    fp->stride = p->cols;
+    fp->nrows = p->cell ? iclamp_(p->rows, 0, h / chi) : 0;
+    fp->ncols = p->cell ? iclamp_(p->cols, 0, w / cwi) : 0;
+    fp->gx = (float)x;
+    /* Same remainder rule as a session pane: the top row starts at the rect's top edge, so the pixels
+       that do not fill a whole row fall BELOW it and the GL y of the last row's bottom is
+       vh - y - nrows*ch. fm_set_size() sized the grid from term_grid_geometry() on this very rect. */
+    fp->pad_gl = (float)r->vh - (float)y - (float)fp->nrows * ch;
+    if (fp->pad_gl < 0.0f)
+        fp->pad_gl = 0.0f;
+}
+
+/* The preview picture's texture. At most one preview exists at a time, so this is one texture instead
+   of a cache: it is re-uploaded when FmPreview.uid changes (a new preview was installed) or when the
+   pixels changed size. uid is never reused, so a recycled malloc address can never paint a stale
+   picture — the same rule KImage.serial enforces for application pictures.
+   fm.c hands out plain RGBA (its tests compare decoded bytes), and the shader composites premultiplied
+   texels, so the copy in Render.fm_px is what gets uploaded. */
+static unsigned fm_preview_tex(Render *r, const FmPreview *pv)
+{
+    if (!pv || pv->kind != FMP_IMAGE || !pv->rgba || pv->w <= 0 || pv->h <= 0)
+        return 0;
+    if (r->fm_tex_uid == pv->uid && r->fm_tex_w == pv->w && r->fm_tex_h == pv->h)
+        return r->fm_tex;
+
+    size_t need = (size_t)pv->w * (size_t)pv->h * 4u;
+    if ((size_t)r->fm_px_cap < need) {
+        free(r->fm_px);
+        uint8_t *buf = malloc(need);
+        if (!buf) {
+            r->fm_px = NULL;
+            r->fm_px_cap = 0;
+            return 0;
+        }
+        r->fm_px = buf;
+        r->fm_px_cap = (int)need;
+    }
+    memcpy(r->fm_px, pv->rgba, need);
+    img_premultiply(r->fm_px, (long long)pv->w * pv->h);
+
+    if (!r->fm_tex)
+        glGenTextures(1, &r->fm_tex);
+    glBindTexture(GL_TEXTURE_2D, r->fm_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, pv->w, pv->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, r->fm_px);
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR)
+        klog(L_WARN, "fm preview glTexImage2D failed: 0x%x (%dx%d)", err, pv->w, pv->h);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    r->fm_tex_uid = pv->uid;
+    r->fm_tex_w = pv->w;
+    r->fm_tex_h = pv->h;
+    return r->fm_tex;
+}
+
+/* Draw the preview picture, clipped to the preview rect. fm_image_fit() decided the box (aspect kept in
+   PIXELS, never upscaled, centred, returned in cells AND in px); the cell box is where it goes and the
+   px box is what is drawn inside it, so the ceil()-ing into cells cannot stretch the picture. */
+static int draw_fm_preview(Render *r, const FileMgr *fm, const Layout *lay, float cw, float ch)
+{
+    const FmGeom *fgm = &lay->fm;
+    if (!fm || !fgm->on || !fgm->prev_on || !fm->pv || fm->pv->kind != FMP_IMAGE)
+        return 0;
+    if (!fm->prev.cell || fm->prev.cols <= 0 || fm->prev.rows <= 0)
+        return 0;
+
+    int col, row, cols, rows, px_w, px_h;
+    fm_image_fit(fm, imax_((int)(cw + 0.5f), 1), imax_((int)(ch + 0.5f), 1),
+                 &col, &row, &cols, &rows, &px_w, &px_h);
+    if (cols <= 0 || rows <= 0 || px_w <= 0 || px_h <= 0)
+        return 0;
+
+    unsigned tex = fm_preview_tex(r, fm->pv);
+    if (!tex)
+        return 0;
+
+    /* the cell box, then the picture centred inside it */
+    float bx = (float)fgm->prev_x + (float)col * cw;
+    float by = (float)fgm->prev_y + (float)row * ch;
+    float x0 = bx + ((float)cols * cw - (float)px_w) * 0.5f;
+    float y0 = by + ((float)rows * ch - (float)px_h) * 0.5f;
+    float cl = x0, ct = y0, cr = x0 + (float)px_w, cb = y0 + (float)px_h;
+    if (cl < (float)fgm->prev_x) cl = (float)fgm->prev_x;
+    if (ct < (float)fgm->prev_y) ct = (float)fgm->prev_y;
+    if (cr > (float)(fgm->prev_x + fgm->prev_w)) cr = (float)(fgm->prev_x + fgm->prev_w);
+    if (cb > (float)(fgm->prev_y + fgm->prev_h)) cb = (float)(fgm->prev_y + fgm->prev_h);
+    if (cr <= cl || cb <= ct)
+        return 0;
+
+    float u0 = (cl - x0) / (float)px_w, u1 = (cr - x0) / (float)px_w;
+    float v0 = (ct - y0) / (float)px_h, v1 = (cb - y0) / (float)px_h;
+
+    /* No GL blending, so the quad composites against its own copy of the background under it: the
+       preview pane's cell there, which pass 1 already painted. fm.c leaves the cells under a picture
+       blank on purpose so the picture sits on the pane background. */
+    int crow = iclamp_(row, 0, fm->prev.rows - 1);
+    int ccol = iclamp_(col, 0, fm->prev.cols - 1);
+    const Cell *anchor = &fm->prev.cell[(size_t)crow * (size_t)fm->prev.cols + (size_t)ccol];
+    float bg[4];
+    col2f(anchor->bg, bg);
+    bg[3] *= r->opacity;
+
+    const float white[4] = { 1, 1, 1, 1 };
+    float rec[FLOATS_PER_INST];
+    float *ip = rec;
+    emit_quad(&ip, cl, (float)r->vh - cb, cr - cl, cb - ct, u0, v0, u1, v1, white, bg, 3.0f,
+              0.0f, 0.0f);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    draw_quads(r, rec, 1);
+    glActiveTexture(GL_TEXTURE0);
+    return 1;
+}
+
+int render_draw(Render *r, Font *f, const Layout *lay, Term *const *terms, const FileMgr *fm)
 {
     glClear(GL_COLOR_BUFFER_BIT);
 
@@ -796,7 +1048,15 @@ int render_draw(Render *r, Font *f, const Layout *lay, Term *const *terms)
     int cells = 0;
     for (int p = 0; p < lay->npane; p++)
         cells += lay->pane[p].cols * lay->pane[p].rows;
-    int maxq = 3 * cells + lay->nitem * (BAR_LABEL_MAX + 2) + 4;
+    int fmcells = 0;
+    if (fm && fm->on) {
+        fmcells += lay->fm.list_cols * lay->fm.list_rows;
+        if (lay->fm.prev_on)
+            fmcells += lay->fm.prev_cols * lay->fm.prev_rows;
+    }
+    /* +8: the focus border is 4 quads, and with the file manager on a pane border and a band border can
+       both be in the same frame. */
+    int maxq = 3 * cells + 3 * fmcells + lay->nitem * (BAR_LABEL_MAX + 2) + 8;
     float *vdata = ensure_vdata(r, maxq);
     float *vp = vdata;
     int nquads = 0;
@@ -851,6 +1111,32 @@ int render_draw(Render *r, Font *f, const Layout *lay, Term *const *terms)
                 emit_quad(&vp, px, py, cw, ch, du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f,
                           white, bg, 0.0f, 0.0f, 0.0f);
                 nquads++;
+            }
+        }
+    }
+
+    /* The file-manager band, pass 1: cell backgrounds. fm.c painted these grids with the CONFIGURED
+       fg/bg plus its own accents, so the band sits inside the terminal's palette. No cursor and no
+       selection live here, which is all that distinguishes a band pane from a session pane. */
+    if (fm && fm->on) {
+        for (int q = 0; q < 2; q++) {
+            int x, y, w, h;
+            if (!fm_pane_rect(&lay->fm, q, &x, &y, &w, &h))
+                continue;
+            FmPaneDraw fp;
+            fm_pane_prepare(r, q ? &fm->prev : &fm->list, x, y, w, h, f, &fp);
+            for (int yy = 0; yy < fp.nrows; yy++) {
+                const Cell *row = fp.cell + (size_t)yy * (size_t)fp.stride;
+                for (int xx = 0; xx < fp.ncols; xx++) {
+                    const Cell *c = &row[xx];
+                    uint32_t cellbg = (c->attr & ATTR_INVERSE) ? c->fg : c->bg;
+                    col2f(cellbg, bg);
+                    bg[3] *= r->opacity;
+                    float px = fp.gx + xx * cw, py = (fp.nrows - 1 - yy) * ch + fp.pad_gl;
+                    emit_quad(&vp, px, py, cw, ch, du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f,
+                              white, bg, 0.0f, 0.0f, 0.0f);
+                    nquads++;
+                }
             }
         }
     }
@@ -931,28 +1217,6 @@ int render_draw(Render *r, Font *f, const Layout *lay, Term *const *terms)
                 if (!c->ch || (c->attr & ATTR_WIDE))
                     continue;
 
-                /* Color emoji first: the cell's whole cluster (anchor + its continuation codepoints) is
-                   shaped by HarfBuzz into ONE color glyph. When the color font has nothing for that
-                   sequence we fall back to the mono glyph from the fontconfig fallback face (session 35),
-                   so emoji still draw on a box with no color font. seq/nseq stay in scope for the whole
-                   cell: the same sequence also decides the quad's span (cluster_is_wide below). */
-                uint32_t seq[CLUSTER_MAX + 1];
-                int nseq = 0;
-                ColorGlyph *cg = NULL;
-                if (f->color_ok && (c->nextra || cp_is_emoji(c->ch))) {
-                    nseq = 1;
-                    seq[0] = c->ch;
-                    for (int k = 0; k < (int)c->nextra && nseq <= CLUSTER_MAX; k++)
-                        seq[nseq++] = c->extra[k];
-                    cg = font_color_glyph(f, seq, nseq);
-                }
-                Glyph *gl_ = NULL;
-                if (!cg) {
-                    gl_ = font_glyph(f, c->ch);
-                    if (!gl_ || gl_->w <= 0 || gl_->h <= 0)
-                        continue;
-                }
-
                 uint32_t cellbg = c->bg, cellfg = c->fg;
                 if (c->attr & ATTR_INVERSE) {
                     uint32_t tmp = cellbg;
@@ -990,51 +1254,43 @@ int render_draw(Render *r, Font *f, const Layout *lay, Term *const *terms)
 
                 float px = pd.gx + x * cw, py = (pd.nrows - 1 - y) * ch + pd.pad_gl;
 
-                if (cg) {
-                    /* The color bitmap carries UNSCALED strike metrics, and f->color_px is that
-                       strike's own pixel height as the font reports it (128 for the installed Noto
-                       Color Emoji), so the scale factor is cell-height / strike-height: zooming
-                       resizes the quad without ever re-rasterizing the emoji. An emoji fills its
-                       cell box; a WIDE emoji gets the 2-cell span it reserved, so it is never
-                       squished. */
-                    float s = ch / (float)f->color_px;
-                    float gw = (float)cg->w * s, gh = (float)cg->h * s;
-                    /* The span is the WHOLE cluster's width, not just the base codepoint's: vt.c
-                       reserved 2 cells for a wide cluster, including clusters whose wide (emoji)
-                       presentation only appears once a modifier is folded in (U+2764 U+FE0F, the
-                       keycaps, a regional-indicator pair). cluster_is_wide is the same predicate
-                       vt.c used, so the quad always matches the reservation. */
-                    float span = cluster_is_wide(seq, nseq) ? 2.0f * cw : cw;
-                    if (gw > span) {
-                        float k = span / gw;
-                        gw *= k;
-                        gh *= k;
-                    }
-                    float gx = px + (span - gw) * 0.5f;   /* centered in the cell span */
-                    float gy = py + (ch - gh) * 0.5f;     /* centered in the line box */
-                    fg[0] = fg[1] = fg[2] = 1.0f; fg[3] = 1.0f;   /* color, never fg-tinted */
-                    if (c->attr & ATTR_DIM) {
-                        fg[0] = fg[1] = fg[2] = 0.5f;     /* shader scales the premul texel */
-                    }
-                    emit_quad(&vp, gx, gy, gw, gh, cg->u0, cg->v0, cg->u1, cg->v1,
-                              fg, bg, 2.0f, band0, band1);
+                if (emit_cell_glyph(f, c, px, py, cw, ch, ascent, fg, bg, band0, band1, &vp))
                     nquads++;
-                    continue;
-                }
+            }
+        }
+    }
 
-                float gw = (float)gl_->w * f->scale;
-                float gh = (float)gl_->h * f->scale;
-                float gx = px + (float)gl_->bearing_x * f->scale;
-                /* baseline: cell_top=py+ch; baseline=cell_top-ascent;
-                   glyph_top=baseline+bearing_y*scale; quad_bottom=glyph_top-gh */
-                float gy = py + ch - ascent + (float)gl_->bearing_y * f->scale - gh;
-                if (c->attr & ATTR_DIM) {
-                    fg[0] *= 0.5f; fg[1] *= 0.5f; fg[2] *= 0.5f;
+    /* The file-manager band, pass 3: glyphs. Same helper, same font, same emoji rules — a file name can
+       contain any codepoint, and fm.c already gave a wide one the ATTR_WIDE continuation cell vt.c
+       uses, so the wide/cluster logic above applies to it unchanged. No selection band here (the file
+       manager has no text selection), hence band0 == band1 == 0. */
+    if (fm && fm->on) {
+        for (int q = 0; q < 2; q++) {
+            int x, y, w, h;
+            if (!fm_pane_rect(&lay->fm, q, &x, &y, &w, &h))
+                continue;
+            FmPaneDraw fp;
+            fm_pane_prepare(r, q ? &fm->prev : &fm->list, x, y, w, h, f, &fp);
+            for (int yy = 0; yy < fp.nrows; yy++) {
+                const Cell *row = fp.cell + (size_t)yy * (size_t)fp.stride;
+                for (int xx = 0; xx < fp.ncols; xx++) {
+                    const Cell *c = &row[xx];
+                    if (!c->ch || (c->attr & ATTR_WIDE))
+                        continue;
+                    uint32_t cbg = c->bg, cfg = c->fg;
+                    if (c->attr & ATTR_INVERSE) {   /* same swap pass 1 applies, so an inverted cell
+                                                       cannot get ink over ink */
+                        uint32_t tmp = cbg;
+                        cbg = cfg;
+                        cfg = tmp;
+                    }
+                    col2f(cfg, fg);
+                    col2f(cbg, bg);
+                    bg[3] *= r->opacity;
+                    float px = fp.gx + xx * cw, py = (fp.nrows - 1 - yy) * ch + fp.pad_gl;
+                    if (emit_cell_glyph(f, c, px, py, cw, ch, ascent, fg, bg, 0.0f, 0.0f, &vp))
+                        nquads++;
                 }
-                emit_quad(&vp, gx, gy, gw, gh,
-                          gl_->u0, gl_->v0, gl_->u1, gl_->v1, fg, bg, 1.0f,
-                          band0, band1);
-                nquads++;
             }
         }
     }
@@ -1068,24 +1324,31 @@ int render_draw(Render *r, Font *f, const Layout *lay, Term *const *terms)
         }
     }
 
-    /* The focus border, emitted last so nothing covers it: side-by-side mode only (with one pane it would
-       just draw a frame around the whole terminal). 2 px wide, drawn in the gap. */
-    if (lay->npane > 1) {
+    /* Which region owns the keyboard, drawn last so nothing covers it. With the file manager off this is
+       the side-by-side focus border and nothing else (with one pane a frame around the whole terminal
+       would be noise). With it on, exactly one of the three regions gets the frame — the browser, the
+       preview, or the terminal pane — because Ctrl+Shift+Up/Down move the keyboard between them and a
+       switch the user cannot see is a switch the user will not notice. */
+    col2f(border_col, bg);
+    bg[3] *= r->opacity;
+    if (fm && fm->on && lay->fm.on) {
+        int x, y, w, h;
+        if (fm->focus == FM_FOCUS_LIST && fm_pane_rect(&lay->fm, 0, &x, &y, &w, &h)) {
+            emit_border(&vp, (float)x, (float)y, (float)w, (float)h, 2.0f, bg, du, dv,
+                        (float)r->vh);
+            nquads += 4;
+        } else if (fm->focus == FM_FOCUS_PREVIEW && fm_pane_rect(&lay->fm, 1, &x, &y, &w, &h)) {
+            emit_border(&vp, (float)x, (float)y, (float)w, (float)h, 2.0f, bg, du, dv,
+                        (float)r->vh);
+            nquads += 4;
+        }
+    }
+    if (lay->npane > 1 || (fm && fm->on && lay->fm.on && fm->focus == FM_FOCUS_TERM)) {
         int ap = layout_pane_of_tab(lay, lay->active_tab);
         if (ap >= 0) {
             const PaneGeom *pg = &lay->pane[ap];
-            col2f(border_col, bg);
-            bg[3] *= r->opacity;
-            float gl_bot = (float)r->vh - (float)(pg->y + pg->h);
-            float gl_top = (float)r->vh - (float)pg->y;
-            emit_quad(&vp, (float)pg->x - 2.0f, gl_top, (float)pg->w + 4.0f, 2.0f,
-                      du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f, white, bg, 0.0f, 0.0f, 0.0f);
-            emit_quad(&vp, (float)pg->x - 2.0f, gl_bot - 2.0f, (float)pg->w + 4.0f, 2.0f,
-                      du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f, white, bg, 0.0f, 0.0f, 0.0f);
-            emit_quad(&vp, (float)pg->x - 2.0f, gl_bot, 2.0f, (float)pg->h,
-                      du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f, white, bg, 0.0f, 0.0f, 0.0f);
-            emit_quad(&vp, (float)pg->x + (float)pg->w, gl_bot, 2.0f, (float)pg->h,
-                      du * 0.5f, dv * 0.5f, du * 1.5f, dv * 1.5f, white, bg, 0.0f, 0.0f, 0.0f);
+            emit_border(&vp, (float)pg->x, (float)pg->y, (float)pg->w, (float)pg->h, 2.0f, bg,
+                        du, dv, (float)r->vh);
             nquads += 4;
         }
     }
@@ -1155,7 +1418,8 @@ int render_draw(Render *r, Font *f, const Layout *lay, Term *const *terms)
 
     /* the pictures, each in its own draw call because each has its own texture */
     int frame = ++r->img_frame;
-    int nimg = 0;
+    int nprev = draw_fm_preview(r, fm, lay, cw, ch);
+    int nimg = nprev;
     for (int p = 0; p < lay->npane; p++) {
         Term *t = pane_term(terms, lay->pane[p].tab);
         if (!t)
@@ -1167,11 +1431,18 @@ int render_draw(Render *r, Font *f, const Layout *lay, Term *const *terms)
 
     /* One line per CHANGE in how many pictures are on screen — the client-side evidence for any
        "the picture is missing" report, and proof that the renderer reached the image path at all
-       (a GLSL or texture failure shows up as the matching warning above it). Not one line a frame. */
-    static int last_nimg = -1;
-    if (last_nimg != nimg) {
-        last_nimg = nimg;
-        klog(L_DEBUG, "graphics: %d image(s) drawn, %d texture(s) held", nimg, r->nimgtex);
+       (a GLSL or texture failure shows up as the matching warning above it). Not one line a frame.
+       The file-manager preview is counted SEPARATELY and named: it has its own texture (Render.fm_tex,
+       not the ImgTex cache `r->nimgtex` counts), so folding it into the same number made the line claim
+       a texture was held when none of the cached ones were, and made a preview look like an application
+       picture. */
+    static int last_app = -1, last_prev = -1;
+    if (last_app != nimg - nprev || last_prev != nprev) {
+        last_app = nimg - nprev;
+        last_prev = nprev;
+        klog(L_DEBUG, "graphics: %d image(s) drawn, %d texture(s) held%s",
+             nimg - nprev, r->nimgtex,
+             nprev ? " + the file-manager preview" : "");
     }
 
     /* batch B: selection bands, glyphs, bar labels, focus border — on top of the pictures, so text
@@ -1215,8 +1486,17 @@ void render_destroy(Render *r)
                 GLuint t = r->imgtex[i].tex;
                 glDeleteTextures(1, &t);
             }
+        if (r->fm_tex) {
+            GLuint t = r->fm_tex;
+            glDeleteTextures(1, &t);
+        }
     }
     free(r->imgtex);
+    free(r->fm_px);
+    r->fm_tex = 0;
+    r->fm_tex_uid = 0;
+    r->fm_px = NULL;
+    r->fm_px_cap = 0;
     if (r->edpy != EGL_NO_DISPLAY) {
         eglMakeCurrent((EGLDisplay)r->edpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         if (r->ectx != EGL_NO_CONTEXT)

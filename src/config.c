@@ -65,6 +65,32 @@ void config_default(Config *c)
     c->tab_bar = BAR_AUTO;
     c->split_max = 4;
     keybind_parse("Ctrl+Shift+S", &c->key_toggle_layout);
+    /* The in-window file manager. OFF by default: a user who never presses the toggle gets exactly the
+       terminal of earlier sessions, and closing it again returns to that state. The band is 12 cell rows
+       (layout.c clamps that against the real window), the preview pane is on, dotfiles are hidden at
+       first, and browsing a directory also moves the shell there (fm_follow). */
+    c->fm_on = 0;
+    c->fm_rows = 12;
+    c->fm_preview = 1;
+    c->fm_show_hidden = 0;
+    c->fm_follow = 1;
+    keybind_parse("Ctrl+Shift+F", &c->key_file_manager);
+    keybind_parse("Ctrl+Shift+Up", &c->key_fm_focus);
+    keybind_parse("Ctrl+Shift+Down", &c->key_fm_release);
+    /* The file manager's own keys are UNMODIFIED on purpose: they are matched only while the file
+       manager has the keyboard, so `Up` still reaches the shell whenever it does not. */
+    keybind_parse_plain("Up",        &c->fm_key.up);
+    keybind_parse_plain("Down",      &c->fm_key.down);
+    keybind_parse_plain("Page_Up",   &c->fm_key.pageup);
+    keybind_parse_plain("Page_Down", &c->fm_key.pagedown);
+    keybind_parse_plain("Home",      &c->fm_key.home);
+    keybind_parse_plain("End",       &c->fm_key.end);
+    keybind_parse_plain("Return",    &c->fm_key.open);
+    keybind_parse_plain("BackSpace", &c->fm_key.parent);
+    keybind_parse_plain("r",         &c->fm_key.refresh);
+    keybind_parse_plain("p",         &c->fm_key.preview);
+    keybind_parse_plain(".",         &c->fm_key.hidden);
+    keybind_parse_plain("Escape",    &c->fm_key.quit);
     c->loglevel = L_WARN;
 }
 
@@ -183,7 +209,7 @@ static int sym_of(const char *tok, uint32_t *sym)
     return 0;
 }
 
-int keybind_parse(const char *spec, KeyBind *out)
+static int keybind_parse_into(const char *spec, KeyBind *out, int allow_plain)
 {
     out->sym = 0;
     out->mods = 0;
@@ -221,7 +247,7 @@ int keybind_parse(const char *spec, KeyBind *out)
         klog(L_WARN, "config: binding '%s' names no key", spec);
         return 0;
     }
-    if (!mods) {
+    if (!mods && !allow_plain) {
         /* Refused on purpose: an unmodified binding would take a plain typing key away from the
            shell, which is never what the user meant to switch a tab with. */
         klog(L_WARN, "config: binding '%s' has no modifier — refusing it (an unmodified binding "
@@ -232,6 +258,18 @@ int keybind_parse(const char *spec, KeyBind *out)
     out->mods = mods;
     out->set = 1;
     return 1;
+}
+
+int keybind_parse(const char *spec, KeyBind *out)
+{
+    return keybind_parse_into(spec, out, 0);
+}
+
+/* A binding that MAY be a bare key. Only the file manager's own keys use this: they are matched only
+   while the file manager owns the keyboard, so they cannot swallow the shell's normal typing. */
+int keybind_parse_plain(const char *spec, KeyBind *out)
+{
+    return keybind_parse_into(spec, out, 1);
 }
 
 /* A modifier-only spec, for the `key_tab_prefix` shortcut (prefix + a digit 1-9). */
@@ -275,6 +313,27 @@ static void set_keybind(KeyBind *kb, const char *key, const char *val)
     if (!keybind_parse(val, &parsed)) {
         klog(L_WARN, "config: %s = '%s' is not a usable binding (want MOD+MOD+KEY, for example "
                      "Ctrl+Shift+T); keeping the current binding", key, val);
+        return;
+    }
+    *kb = parsed;
+}
+
+/* The same, for a file-manager key: a bare key such as `Up` or `r` is legal here. */
+static void set_fm_keybind(KeyBind *kb, const char *key, const char *val)
+{
+    if (!val[0] || !strcmp(val, "0") || !strcasecmp(val, "none") ||
+        !strcasecmp(val, "off") || !strcasecmp(val, "no")) {
+        kb->sym = 0;
+        kb->mods = 0;
+        kb->set = 0;
+        klog(L_INFO, "config: %s unbound", key);
+        return;
+    }
+    KeyBind parsed;
+    if (!keybind_parse_plain(val, &parsed)) {
+        klog(L_WARN, "config: %s = '%s' is not a usable key (a single character, a name such as "
+                     "Up / Return / Escape, optionally with modifiers); keeping the current binding",
+             key, val);
         return;
     }
     *kb = parsed;
@@ -372,6 +431,53 @@ static void apply(Config *c, const char *key, char *val)
         c->split_max = iclamp_(atoi(val), 1, TAB_MAX);
     } else if (!strcmp(key, "key_toggle_layout")) {
         set_keybind(&c->key_toggle_layout, key, val);
+    } else if (!strcmp(key, "file_manager")) {
+        /* Start with the file manager shown. Off by default; the toggle is Ctrl+Shift+F. */
+        c->fm_on = cfg_bool(val) ? 1 : 0;
+    } else if (!strcmp(key, "fm_rows")) {
+        /* Cell rows the file-manager band asks for. layout.c clamps this again against the window and
+           always leaves the terminal pane at least FM_TERM_MIN_ROWS rows. */
+        c->fm_rows = iclamp_(atoi(val), FM_ROWS_MIN, FM_ROWS_MAX);
+    } else if (!strcmp(key, "fm_preview")) {
+        /* The preview pane next to the browser (toggled at runtime too). Off = the browser is full width. */
+        c->fm_preview = cfg_bool(val) ? 1 : 0;
+    } else if (!strcmp(key, "fm_show_hidden")) {
+        /* Dotfiles are part of the listing from the start (toggled at runtime with fm_key_hidden). */
+        c->fm_show_hidden = cfg_bool(val) ? 1 : 0;
+    } else if (!strcmp(key, "fm_follow")) {
+        /* Navigating the browser also sends `cd <path>` to the shell, so the prompt lands in the
+           directory being browsed. Off = the shell stays wherever the user left it. */
+        c->fm_follow = cfg_bool(val) ? 1 : 0;
+    } else if (!strcmp(key, "key_file_manager")) {
+        set_keybind(&c->key_file_manager, key, val);
+    } else if (!strcmp(key, "key_fm_focus")) {
+        set_keybind(&c->key_fm_focus, key, val);
+    } else if (!strcmp(key, "key_fm_release")) {
+        set_keybind(&c->key_fm_release, key, val);
+    } else if (!strcmp(key, "fm_key_up")) {
+        set_fm_keybind(&c->fm_key.up, key, val);
+    } else if (!strcmp(key, "fm_key_down")) {
+        set_fm_keybind(&c->fm_key.down, key, val);
+    } else if (!strcmp(key, "fm_key_pageup")) {
+        set_fm_keybind(&c->fm_key.pageup, key, val);
+    } else if (!strcmp(key, "fm_key_pagedown")) {
+        set_fm_keybind(&c->fm_key.pagedown, key, val);
+    } else if (!strcmp(key, "fm_key_home")) {
+        set_fm_keybind(&c->fm_key.home, key, val);
+    } else if (!strcmp(key, "fm_key_end")) {
+        set_fm_keybind(&c->fm_key.end, key, val);
+    } else if (!strcmp(key, "fm_key_open")) {
+        set_fm_keybind(&c->fm_key.open, key, val);
+    } else if (!strcmp(key, "fm_key_parent")) {
+        set_fm_keybind(&c->fm_key.parent, key, val);
+    } else if (!strcmp(key, "fm_key_refresh")) {
+        set_fm_keybind(&c->fm_key.refresh, key, val);
+    } else if (!strcmp(key, "fm_key_preview")) {
+        set_fm_keybind(&c->fm_key.preview, key, val);
+    } else if (!strcmp(key, "fm_key_hidden")) {
+        set_fm_keybind(&c->fm_key.hidden, key, val);
+    } else if (!strcmp(key, "fm_key_quit")) {
+        set_fm_keybind(&c->fm_key.quit, key, val);
     } else if (!strcmp(key, "log")) {
         c->loglevel = iclamp_(atoi(val), L_ERROR, L_DEBUG);
     } else {

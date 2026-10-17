@@ -22,7 +22,12 @@
    * The terminal wins over the chrome: if the bar would leave no room for one cell row, the bar is
      dropped for that frame rather than shrinking the grid to nothing.
    * In side-by-side mode at most split_max panes are shown; when there are more sessions than that, the
-     shown window of tabs slides to contain the active one. */
+     shown window of tabs slides to contain the active one.
+   * With the file manager on, the grid area is split HORIZONTALLY first: a band of fm_rows cell rows on
+     top (browser left, preview right) and the terminal pane(s) below it. The sessions stay ordinary
+     entries in pane[], only shorter, so every hit test, focus border and pointer -> cell mapping works
+     whether the band is on or off. If the window cannot hold the band AND FM_TERM_MIN_ROWS of terminal,
+     the band is dropped for that frame — the terminal wins again. */
 #include "kai-term.h"
 
 /* Cut a string to at most `max` UTF-8 codepoints, never in the middle of a multi-byte sequence. A tab's
@@ -116,6 +121,47 @@ void layout_compute(const LayoutReq *rq, Layout *out)
         }
     }
 
+    /* ---- the file-manager band, above the terminal pane(s) ----
+       The band takes fm_rows cell rows of the grid area and the sessions keep the rest. The terminal
+       stays a normal PaneGeom in pane[], only shorter, which is what lets every existing hit test, the
+       focus border and W.gx/W.gy keep working with the file manager on AND off. */
+    int pane_y = grid_y, pane_h = grid_h;
+    if (rq->fm_on) {
+        int want = iclamp_(imax_(rq->fm_rows, FM_ROWS_MIN), FM_ROWS_MIN, FM_ROWS_MAX);
+        int band_h = want * ch;
+        /* The shell keeps at least FM_TERM_MIN_ROWS rows. If that leaves less than a usable band, the
+           band is dropped for this frame rather than starving the terminal — the bar's rule again. */
+        int room = grid_h - gap - FM_TERM_MIN_ROWS * ch;
+        if (band_h > room)
+            band_h = room;
+        if (band_h >= FM_ROWS_MIN * ch && grid_w >= 2 * cw) {
+            FmGeom *fg = &out->fm;
+            fg->on = 1;
+            fg->list_x = grid_x;
+            fg->list_y = grid_y;
+            fg->list_h = band_h;
+            /* A preview narrower than a couple of cells is worse than no preview, so the whole band
+               becomes the browser. The remainder of the half-split stays on the RIGHT of the band,
+               like every other whole-cell remainder. */
+            int prev_on = rq->fm_preview_on && grid_w >= 3 * cw + gap;
+            fg->list_w = prev_on ? (grid_w - gap) / 2 : grid_w;
+            fg->prev_on = prev_on;
+            int xo, yo;
+            term_grid_geometry(fg->list_w, fg->list_h, cw, ch, 0,
+                               &fg->list_cols, &fg->list_rows, &xo, &yo);
+            if (prev_on) {
+                fg->prev_w = grid_w - gap - fg->list_w;
+                fg->prev_x = grid_x + fg->list_w + gap;
+                fg->prev_y = grid_y;
+                fg->prev_h = band_h;
+                term_grid_geometry(fg->prev_w, fg->prev_h, cw, ch, 0,
+                                   &fg->prev_cols, &fg->prev_rows, &xo, &yo);
+            }
+            pane_y = grid_y + band_h + gap;
+            pane_h = grid_h - band_h - gap;
+        }
+    }
+
     /* Which sessions get a pane, and how wide each pane is. */
     int npane = 0, start = 0, pane_w = grid_w;
     if (ntab > 0) {
@@ -135,9 +181,9 @@ void layout_compute(const LayoutReq *rq, Layout *out)
     for (int i = 0; i < npane; i++) {
         PaneGeom *pg = &out->pane[i];
         pg->x = grid_x + i * (pane_w + gap);
-        pg->y = grid_y;
+        pg->y = pane_y;
         pg->w = pane_w;
-        pg->h = grid_h;
+        pg->h = pane_h;
         pg->tab = start + i;
         /* No inner margin inside a pane: `gap` already separates the panes, and Config.padding is the
            window's own margin. xoff/yoff are therefore 0 and pane.x/pane.y ARE the grid origin, which is
@@ -167,6 +213,20 @@ int layout_hit_pane(const Layout *l, int px, int py)
     return -1;      /* margin, gap, or below the last row */
 }
 
+int layout_hit_fm(const Layout *l, int px, int py)
+{
+    const FmGeom *fg = &l->fm;
+    if (!fg->on)
+        return FM_HIT_NONE;
+    if (px >= fg->list_x && px < fg->list_x + fg->list_w &&
+        py >= fg->list_y && py < fg->list_y + fg->list_h)
+        return FM_HIT_LIST;
+    if (fg->prev_on && px >= fg->prev_x && px < fg->prev_x + fg->prev_w &&
+        py >= fg->prev_y && py < fg->prev_y + fg->prev_h)
+        return FM_HIT_PREVIEW;
+    return FM_HIT_NONE;      /* the gap between the two panes, or below the band */
+}
+
 int layout_pane_of_tab(const Layout *l, int tab)
 {
     for (int i = 0; i < l->npane; i++)
@@ -191,10 +251,12 @@ void layout_grid_size(const Layout *l, int *cols, int *rows)
 
 /* The window size to ask the compositor for at startup. Kept next to layout_compute() because it is its
    inverse for this one case: the grid must fit the window that layout_compute() will later measure, and the
-   bar costs one cell ROW plus the gap — cell_h, never cell_w. tests/test_vt.c feeds the result straight
-   back into layout_compute() and requires the requested cols x rows to come out again. */
+   bar costs one cell ROW plus the gap — cell_h, never cell_w. The file-manager band costs fm_rows rows plus
+   one more gap, for the same reason: layout_compute() subtracts exactly that from the grid area, so feeding
+   this back into it returns the configured cols x rows for the TERMINAL pane. tests/test_vt.c does exactly
+   that round trip, with the band on and off. */
 void layout_initial_size(int cols, int rows, int cell_w, int cell_h, int pad, int gap, int bar,
-                         int *win_w, int *win_h)
+                         int fm_on, int fm_rows, int *win_w, int *win_h)
 {
     int cw = imax_(cell_w, 1), ch = imax_(cell_h, 1);
     int p  = imax_(pad, 0), g = imax_(gap, 0);
@@ -204,4 +266,6 @@ void layout_initial_size(int cols, int rows, int cell_w, int cell_h, int pad, in
     /* BAR_AUTO shows nothing with the single starting session, so it needs no extra height here. */
     if (bar == BAR_ALWAYS)
         *win_h += ch + g;
+    if (fm_on)
+        *win_h += iclamp_(imax_(fm_rows, FM_ROWS_MIN), FM_ROWS_MIN, FM_ROWS_MAX) * ch + g;
 }

@@ -4,7 +4,6 @@
 #include <errno.h>
 #include <unistd.h>
 #include <zlib.h>
-#include <png.h>
 
 int kai_term_loglevel = L_WARN;
 
@@ -1687,8 +1686,6 @@ static void csi_dispatch(Term *t, int fin)
 
 #define IMAGE_BYTES_MAX (64LL << 20)     /* decoded bytes one session keeps */
 #define IMAGE_COUNT_MAX 256              /* images one session keeps */
-#define IMAGE_DIM_MAX   4096             /* accepted px per side */
-#define IMAGE_PIX_MAX   (16LL << 20)     /* accepted pixels per image */
 #define APC_BYTES_MAX   (32u << 20)      /* buffered APC payload (one sequence) */
 #define ZINFLATE_MAX    (64u << 20)      /* largest payload a compressed chunk may expand to */
 
@@ -1764,41 +1761,6 @@ static uint8_t *zinflate(const uint8_t *in, size_t n, size_t *outlen)
     return NULL;
 }
 
-/* PNG through libpng's simplified API: it handles palette, 16-bit and interlaced input and
-   always hands over 8-bit RGBA, which is the one format the rest of this code has to know. */
-static uint8_t *decode_png(const uint8_t *mem, size_t n, int *w, int *h)
-{
-    png_image img;
-    memset(&img, 0, sizeof img);
-    img.version = PNG_IMAGE_VERSION;
-    if (!png_image_begin_read_from_memory(&img, mem, n)) {
-        klog(L_WARN, "graphics: png: %s", img.message);
-        return NULL;
-    }
-    if (img.width > IMAGE_DIM_MAX || img.height > IMAGE_DIM_MAX ||
-        (long long)img.width * (long long)img.height > IMAGE_PIX_MAX) {
-        klog(L_WARN, "graphics: png %ux%u too large", (unsigned)img.width, (unsigned)img.height);
-        png_image_free(&img);
-        return NULL;
-    }
-    img.format = PNG_FORMAT_RGBA;
-    size_t sz = PNG_IMAGE_SIZE(img);
-    uint8_t *out = malloc(sz ? sz : 1);
-    if (!out) {
-        png_image_free(&img);
-        return NULL;
-    }
-    if (!png_image_finish_read(&img, NULL, out, 0, NULL)) {
-        klog(L_WARN, "graphics: png read: %s", img.message);
-        png_image_free(&img);
-        free(out);
-        return NULL;
-    }
-    *w = (int)img.width;
-    *h = (int)img.height;
-    return out;
-}
-
 /* f=24 (RGB) / f=32 (RGBA): the raw pixels, whose size the application must have given.
    The protocol is ambiguous about HOW it gives it: the kitty spec says s= is the byte size of the
    uncompressed data and r= its row count (so width = s/(r*bpp)), while an encoder that treats s= as
@@ -1817,8 +1779,8 @@ static uint8_t *decode_raw(int fmt, int s_val, int rows, const uint8_t *raw, siz
     } else if (rows > 0 && s_val % (rows * bpp) == 0 && (long long)n >= (long long)s_val) {
         pw = s_val / (rows * bpp);                           /* s= is the byte count */
     }
-    if (pw < 1 || ph < 1 || pw > IMAGE_DIM_MAX || ph > IMAGE_DIM_MAX ||
-        (long long)pw * ph > IMAGE_PIX_MAX) {
+    if (pw < 1 || ph < 1 || pw > IMG_DIM_MAX || ph > IMG_DIM_MAX ||
+        (long long)pw * ph > IMG_PIX_MAX) {
         klog(L_WARN, "graphics: raw image has no usable size (s=%d, r=%d, %zu bytes)",
              s_val, rows, n);
         return NULL;
@@ -1841,22 +1803,10 @@ static uint8_t *decode_raw(int fmt, int s_val, int rows, const uint8_t *raw, siz
     return out;
 }
 
-/* The renderer composites image texels as c + bg*(1-c.a) with no GL blending — the same rule the
-   color-emoji atlas follows — so the texels must already be premultiplied.
-   Rounding is +128, NOT +255: (x*255 + 255)/255 == 256 for x == 255, and the cast to uint8_t turned a
-   fully opaque WHITE pixel black (found by the test in tests/test_vt.c, missed by the s68 probe whose
-   sample pixel was never white). */
-static void premultiply(uint8_t *rgba, long long npix)
-{
-    for (long long i = 0; i < npix; i++) {
-        unsigned a = rgba[i * 4 + 3];
-        for (int k = 0; k < 3; k++)
-            rgba[i * 4 + k] = (uint8_t)((rgba[i * 4 + k] * a + 128) / 255);
-    }
-}
-
 /* Turn the assembled payload into premultiplied RGBA. The payload's own magic wins over f=,
-   because a PNG is self-describing and an application may set f= loosely. */
+   because a PNG is self-describing and an application may set f= loosely. The decoders themselves
+   live in src/img.c, which the file manager's preview pane uses too — the PNG a terminal application
+   transmits and the PNG a preview reads from disk must go through the same code. */
 static uint8_t *decode_image(const KittyTx *tx, int *w, int *h)
 {
     const uint8_t *raw = tx->buf;
@@ -1878,7 +1828,7 @@ static uint8_t *decode_image(const KittyTx *tx, int *w, int *h)
     static const uint8_t png_magic[8] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' };
     uint8_t *out = NULL;
     if (n >= 8 && !memcmp(raw, png_magic, 8))
-        out = decode_png(raw, n, w, h);
+        out = img_decode_png(raw, n, w, h);
     else if (tx->fmt == 24 || tx->fmt == 32)
         out = decode_raw(tx->fmt, tx->pw, tx->ph, raw, n, w, h);
     else
@@ -1886,7 +1836,12 @@ static uint8_t *decode_image(const KittyTx *tx, int *w, int *h)
     free(inf);
     if (!out)
         return NULL;
-    premultiply(out, (long long)(*w) * (*h));
+    /* The renderer composites texels as c + bg*(1-c.a) with no GL blending — the same rule the
+       color-emoji atlas follows — so the texels must already be premultiplied.
+       Rounding is +128, NOT +255: (x*255 + 255)/255 == 256 for x == 255, and the cast to uint8_t turned
+       a fully opaque WHITE pixel black (found by the test in tests/test_vt.c, missed by the s68 probe
+       whose sample pixel was never white). */
+    img_premultiply(out, (long long)(*w) * (*h));
     return out;
 }
 

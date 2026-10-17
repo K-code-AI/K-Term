@@ -5,7 +5,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
+#include <stdint.h>
 #include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/signalfd.h>
@@ -125,6 +127,44 @@ static int layout_mode = LAYOUT_TABS;   /* LAYOUT_TABS (one session fills the wi
    over its neighbour. */
 #define PANE_GAP 8
 
+/* The in-window file manager. What lives HERE is only the wiring: which region owns the keyboard, the
+   worker thread that keeps a huge directory or a 12 MB photo off the frame path, the result pipe that
+   hands an answer back to this thread, and the `cd <path>` the shell gets when the browser moves. The
+   model is src/fm.c, the band geometry is src/layout.c, the drawing is src/render.c.
+   It is OFF by default and its worker thread does not exist until the feature is first opened, so a
+   session that never touches it runs exactly the code it ran before. */
+static FileMgr g_fm;
+
+/* The worker's request slots hold only the NEWEST request of each kind: a request superseded before the
+   thread got to it is overwritten rather than queued. That is the same rule fm_install_scan() and
+   fm_install_preview() apply to an answer that lands after the user moved on, applied one step earlier
+   so the disk is not even read for it. */
+enum { FMQ_SCAN = 0, FMQ_PREVIEW = 1, FMQ_KINDS = 2 };
+typedef struct {
+    int used;
+    char path[FM_PATH_MAX];
+    unsigned long seq;
+} FmReq;
+static FmReq fm_req[FMQ_KINDS];
+static int fm_quit;                 /* the worker must leave its cond_wait and exit */
+static int fm_worker_up;
+/* The directory the shell was last told to move into (fm_follow). One per window, because one window has
+   one file manager; a session switch clears it so the newly visible shell is re-synced on the next
+   navigation. Declared up here because tab_switch() resets it and fm_send_cd() is further down. */
+static char fm_last_cd[FM_PATH_MAX];
+static pthread_t fm_thr;
+static pthread_mutex_t fm_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t fm_cv = PTHREAD_COND_INITIALIZER;
+static int fm_pipe[2] = { -1, -1 }; /* [0] read end (in epoll), [1] written by the worker */
+
+/* One answer through the pipe. Both ends are the same process, so the pointer is just a value; the write
+   is one 24-byte struct, far under PIPE_BUF, so it is atomic and the reader never sees half an answer. */
+typedef struct {
+    int kind;                       /* FMQ_SCAN / FMQ_PREVIEW */
+    unsigned long seq;
+    unsigned long ptr;              /* FmScan * or FmPreview *, ownership moves to the reader */
+} FmResult;
+
 static Term *cur_term(void)
 {
     Tab *t = mux_cur(&mux);
@@ -242,6 +282,9 @@ static void layout_apply(void)
     rq.active = mux_active(&mux);
     rq.split_max = conf.split_max;
     rq.bar = conf.tab_bar;
+    rq.fm_on = g_fm.on;
+    rq.fm_preview_on = g_fm.preview_on;
+    rq.fm_rows = conf.fm_rows;
     for (int i = 0; i < rq.ntab; i++) {
         rq.tab[i].tab = i;
         rq.tab[i].attention = mux.tab[i].attention;
@@ -285,6 +328,13 @@ static void layout_apply(void)
         W.gx = g_layout.pane[pi].x;
         W.gy = g_layout.pane[pi].y;
     }
+
+    /* The band's two panes are Cell grids sized by the layout exactly like a session grid is: this is the
+       one place that knows their rects, so it is the one place allowed to resize the grids fm_paint()
+       writes and render_draw() reads. With the file manager off the rects are 0x0 and the grids are
+       freed. */
+    fm_set_size(&g_fm, g_layout.fm.list_cols, g_layout.fm.list_rows,
+                g_layout.fm.prev_cols, g_layout.fm.prev_rows);
 
     /* One line per SHAPE change rather than per frame: it is the client-side evidence for every
        "the bar or the panes look wrong" report, and it is what tests/cli_test.sh greps for. */
@@ -406,7 +456,13 @@ static void redraw(void)
     Term *terms[TAB_MAX];
     for (int i = 0; i < mux_count(&mux); i++)
         terms[i] = &mux.tab[i].term;
-    if (!render_draw(&rend, &font, &g_layout, terms)) {
+    /* The band is painted from the model into its Cell grids here, after layout_apply() sized them and
+       before the frame is built. Painting is cheap (a few thousand Cells) and only happens when the
+       model says it changed (fm->dirty), which navigation, a new listing, a new preview and a resize
+       all set. */
+    if (g_fm.on && g_fm.dirty)
+        fm_paint(&g_fm, conf.fg, conf.bg);
+    if (!render_draw(&rend, &font, &g_layout, terms, &g_fm)) {
         /* NO buffer was attached, so nothing may be armed on the commit that follows: the done of a
            commit without a buffer can stay pending forever, and every draw path here is gated on "no
            callback in flight" (that is exactly how the fullscreen freeze worked). Keep the frame dirty
@@ -608,6 +664,10 @@ static void tab_switch(int idx)
        holds, so it cannot report a switch that did not happen. */
     int act = mux_goto(&mux, idx);
     W.selecting = 0;      /* a drag belongs to the tab it started in */
+    /* The newly visible session's shell may be anywhere. Forgetting where the file manager last sent a
+       `cd` means the next navigation re-states the directory to this shell instead of silently doing
+       nothing because some OTHER session was already told. */
+    fm_last_cd[0] = 0;
     klog(L_INFO, "mux: tab %d/%d visible", act + 1, mux_count(&mux));
     /* Which session is visible is part of the LAYOUT: it is the item the bar highlights, the pane the
        focus border is drawn around, the session the pane window slides to in split view, and the one whose
@@ -625,6 +685,465 @@ static void layout_toggle(void)
     layout_mode = (layout_mode == LAYOUT_SPLIT) ? LAYOUT_TABS : LAYOUT_SPLIT;
     layout_apply();
     W.dirty = 1;
+}
+
+/* ---------------- the in-window file manager: the wiring ---------------- */
+
+/* The worker thread. It runs exactly two functions — fm_scan_build() and fm_preview_build() — which touch
+   nothing but malloc, the filesystem and their own argument (that is the whole reason fm.c is
+   model-only), so it never reads or writes FileMgr. The main thread keeps ownership of the model and
+   installs every answer, which is why the request-id rule in fm_install_*() is the only synchronisation
+   the model itself needs. A 30 000-entry directory or a 16 MB photograph therefore costs a frame
+   nothing: the answer simply arrives on the pipe when it is ready, and is dropped if the user has
+   moved on since. */
+static void *fm_worker(void *unused)
+{
+    (void)unused;
+    for (;;) {
+        int kind = -1;
+        char path[FM_PATH_MAX];
+        unsigned long seq = 0;
+
+        pthread_mutex_lock(&fm_mtx);
+        while (!fm_quit) {
+            for (int i = 0; i < FMQ_KINDS; i++)
+                if (fm_req[i].used) {
+                    kind = i;
+                    break;
+                }
+            if (kind >= 0)
+                break;
+            pthread_cond_wait(&fm_cv, &fm_mtx);
+        }
+        if (kind >= 0) {
+            snprintf(path, sizeof path, "%s", fm_req[kind].path);
+            seq = fm_req[kind].seq;
+            fm_req[kind].used = 0;
+        }
+        pthread_mutex_unlock(&fm_mtx);
+        if (kind < 0)
+            return NULL;              /* fm_quit: the main thread is shutting down */
+
+        FmResult res;
+        res.kind = kind;
+        res.seq = seq;
+        res.ptr = 0;
+        if (kind == FMQ_SCAN)
+            res.ptr = (unsigned long)(uintptr_t)fm_scan_build(path, seq);
+        else
+            res.ptr = (unsigned long)(uintptr_t)fm_preview_build(path, seq);
+        if (!res.ptr)
+            continue;                 /* the builder already logged why it has nothing */
+
+        ssize_t w;
+        do {
+            w = write(fm_pipe[1], &res, sizeof res);
+        } while (w < 0 && errno == EINTR);
+        if (w != (ssize_t)sizeof res) {
+            /* nowhere to hand the answer to: free it here rather than leak it */
+            if (kind == FMQ_SCAN)
+                fm_scan_free((FmScan *)(uintptr_t)res.ptr);
+            else
+                fm_preview_free((FmPreview *)(uintptr_t)res.ptr);
+        }
+    }
+}
+
+/* Start the worker the first time the file manager is opened — never before, so a session that does not
+   use the feature creates no thread and no descriptor. */
+static int fm_worker_start(void)
+{
+    if (fm_worker_up)
+        return 1;
+    if (pipe(fm_pipe) < 0) {
+        klog(L_WARN, "fm: pipe: %s — the file manager cannot load anything", strerror(errno));
+        fm_pipe[0] = fm_pipe[1] = -1;
+        return 0;
+    }
+    fcntl(fm_pipe[0], F_SETFL, O_NONBLOCK);
+    struct epoll_event ev = { .events = EPOLLIN, .data.fd = fm_pipe[0] };
+    if (g_ep >= 0 && epoll_ctl(g_ep, EPOLL_CTL_ADD, fm_pipe[0], &ev) != 0) {
+        klog(L_WARN, "fm: cannot watch the worker's result pipe: %s", strerror(errno));
+        close(fm_pipe[0]);
+        close(fm_pipe[1]);
+        fm_pipe[0] = fm_pipe[1] = -1;
+        return 0;
+    }
+    if (pthread_create(&fm_thr, NULL, fm_worker, NULL) != 0) {
+        klog(L_WARN, "fm: pthread_create failed — the file manager cannot load anything");
+        if (g_ep >= 0)
+            epoll_ctl(g_ep, EPOLL_CTL_DEL, fm_pipe[0], NULL);
+        close(fm_pipe[0]);
+        close(fm_pipe[1]);
+        fm_pipe[0] = fm_pipe[1] = -1;
+        return 0;
+    }
+    fm_worker_up = 1;
+    klog(L_DEBUG, "fm: worker started (result fd %d)", fm_pipe[0]);
+    return 1;
+}
+
+/* Hand the worker a request. The path is copied into the slot: the worker must never read FileMgr, and
+   the path may be a stack buffer of the caller. */
+static int fm_ask(int kind, const char *path, unsigned long seq)
+{
+    if (!fm_worker_up || fm_pipe[1] < 0)
+        return 0;
+    pthread_mutex_lock(&fm_mtx);
+    snprintf(fm_req[kind].path, sizeof fm_req[kind].path, "%s", path);
+    fm_req[kind].seq = seq;
+    fm_req[kind].used = 1;
+    pthread_cond_signal(&fm_cv);
+    pthread_mutex_unlock(&fm_mtx);
+    return 1;
+}
+
+/* Ask for whatever the model says should be previewed now. fm_preview_request() compares it with what is
+   installed and says whether anything has to be built at all, so moving the selection onto the entry
+   that is already previewed costs no disk access. */
+static void fm_ask_preview(void)
+{
+    if (!g_fm.preview_on)
+        return;
+    unsigned long seq = 0;
+    char path[FM_PATH_MAX];
+    if (fm_preview_request(&g_fm, &seq, path, sizeof path))
+        fm_ask(FMQ_PREVIEW, path, seq);
+}
+
+/* Take every answer the worker has written. Runs from the event loop when the read end is readable, and
+   once more at shutdown to free anything that arrived after the last drain. */
+static void fm_drain_results(void)
+{
+    if (fm_pipe[0] < 0)
+        return;
+    for (;;) {
+        FmResult res;
+        ssize_t r = read(fm_pipe[0], &res, sizeof res);
+        if (r == (ssize_t)sizeof res) {
+            if (res.kind == FMQ_SCAN) {
+                /* fm_install_scan frees the answer either way: it takes ownership, and drops it (after
+                   freeing) when it answers a request the user already replaced. */
+                if (fm_install_scan(&g_fm, (FmScan *)(uintptr_t)res.ptr))
+                    fm_ask_preview();   /* the selection may have moved when the listing landed */
+            } else {
+                fm_install_preview(&g_fm, (FmPreview *)(uintptr_t)res.ptr);
+            }
+            W.dirty = 1;
+            continue;
+        }
+        if (r < 0 && errno == EINTR)
+            continue;
+        break;                        /* EAGAIN: everything queued has been taken */
+    }
+}
+
+/* Quote one path for the shell: single quotes, with an embedded quote written the shell's way as '\\''.
+   Nothing else needs escaping inside single quotes, and a quoted path cannot glob or be read as a
+   leading-dash option. Returns the number of bytes written (NUL included at out[n]). */
+static size_t shell_quote(char *out, size_t cap, const char *path)
+{
+    if (cap < 3)
+        return 0;
+    size_t n = 0;
+    out[n++] = '\'';
+    for (const char *s = path; *s && n + 5 < cap; s++) {
+        if (*s == '\'') {
+            out[n++] = '\''; out[n++] = '\\'; out[n++] = '\''; out[n++] = '\'';
+        } else {
+            out[n++] = *s;
+        }
+    }
+    out[n++] = '\'';
+    out[n] = 0;
+    return n;
+}
+
+/* Hand the shell the directory the browser moved into, so the prompt lands where the user is looking
+   (fm_follow). Never sent to a session on the alternate screen: vim, htop and less would receive it as
+   typing. A shell sitting at a prompt takes it as the command it is; a shell running a foreground
+   program queues it the same way a user typing would.
+   Only for a directory we have not already told it about: `fm_last_cd` (declared with the other file
+   manager state, near g_fm) is the directory the shell was last sent to. Without that, pressing the
+   refresh key — a navigation that does NOT change the directory — typed and executed
+   `cd '<where you already are>'` at the prompt (measured live, s74).
+   A directory the user reaches by typing `cd` themselves is not tracked, so navigating away and back to
+   it sends the line again; that is the safe direction to be wrong in. */
+
+static void fm_send_cd(const char *dir)
+{
+    Term *t = cur_term();
+    Pty *p = cur_pty();
+    if (!t || !p || t->alt_screen || !conf.fm_follow)
+        return;
+    if (!dir[0] || !strcmp(fm_last_cd, dir))
+        return;
+    char cmd[FM_PATH_MAX + 16];
+    size_t n = 0;
+    cmd[n++] = 'c'; cmd[n++] = 'd'; cmd[n++] = ' ';
+    n += shell_quote(cmd + n, sizeof cmd - n, dir);
+    cmd[n++] = '\r';
+    cmd[n] = 0;
+    pty_write(p, cmd, n);
+    snprintf(fm_last_cd, sizeof fm_last_cd, "%s", dir);
+    /* Logged AFTER the write, and naming the directory the model actually holds rather than the one some
+       caller asked for: a line that printed its own argument could claim a cd the alt-screen gate (or a
+       dead pty) refused. This is the only client-side evidence the follow-the-directory rule has. */
+    klog(L_DEBUG, "fm: told the shell to follow: cd %s", dir);
+}
+
+/* The model changed: re-apply the geometry (layout_apply() is what calls fm_set_size() with the band's
+   rects) and ask for a redraw. The grids themselves are painted in redraw(), just before the frame. */
+static void fm_touch(void)
+{
+    layout_apply();
+    W.dirty = 1;
+}
+
+static void fm_open(void)
+{
+    if (g_fm.on)
+        return;
+    if (!fm_worker_start())
+        return;               /* the reason is already in the log; an empty band would only confuse */
+    g_fm.on = 1;
+    g_fm.focus = FM_FOCUS_LIST;
+    unsigned long seq = 0;
+    fm_refresh(&g_fm, &seq);  /* opening always re-reads: files may have appeared while it was closed */
+    fm_ask(FMQ_SCAN, g_fm.dir, seq);
+    fm_ask_preview();
+    fm_touch();
+    klog(L_DEBUG, "fm: opened on %s", g_fm.dir);
+}
+
+/* Closing leaves the terminal exactly as it was: the band's rects go back to 0x0 (layout_apply does
+   that), the terminal pane takes the whole grid area back, and the model keeps its listing so reopening
+   is instant. The worker thread stays alive but idle — killing and re-creating it per open buys nothing
+   and would race with an answer already in the pipe. */
+static void fm_close(void)
+{
+    if (!g_fm.on)
+        return;
+    g_fm.on = 0;
+    g_fm.focus = FM_FOCUS_TERM;
+    fm_touch();
+    klog(L_DEBUG, "fm: closed — the terminal is the whole window again");
+}
+
+static void fm_toggle(void)
+{
+    if (g_fm.on)
+        fm_close();
+    else
+        fm_open();
+}
+
+/* Which region the keyboard drives. The border render.c draws around the focused region is what makes a
+   switch visible, so a switch that changes nothing on screen is deliberately not allowed: focusing the
+   preview pane when it is toggled away does nothing at all. */
+static void fm_focus_set(int f)
+{
+    if (!g_fm.on)
+        return;
+    if (f == FM_FOCUS_PREVIEW && !g_fm.preview_on)
+        return;
+    if (g_fm.focus == f)
+        return;
+    g_fm.focus = f;
+    W.dirty = 1;
+    klog(L_DEBUG, "fm: keyboard -> %s",
+         f == FM_FOCUS_TERM ? "terminal" : (f == FM_FOCUS_PREVIEW ? "preview" : "browser"));
+}
+
+/* One navigation that happened: ask the worker for the new listing, tell the shell (fm_follow), re-ask
+   for the preview of whatever the selection landed on, and re-apply the geometry. `changed` is the
+   model's own answer, so a navigation that went nowhere costs nothing.
+   `seq` MUST already hold the id the model issued — callers fill it with fm_go_sel()/fm_parent()/
+   fm_refresh() in their own statement and pass it here. Writing `fm_nav(fm_go_sel(fm, &seq), seq, ...)`
+   compiles, warns about nothing and is broken: C evaluates arguments in an unspecified order, and gcc
+   reads the caller's initialised-to-0 `seq` BEFORE fm_go_sel fills it (proved with
+   .scratch/s74/argorder.c). Measured live, session 74: every listing issued after a navigation carried
+   id 0, so fm_install_scan() dropped it as stale and the browser kept showing the directory the user
+   had already left. */
+static void fm_nav(int changed, unsigned long seq, const char *what)
+{
+    if (!changed)
+        return;
+    fm_ask(FMQ_SCAN, g_fm.dir, seq);
+    fm_send_cd(g_fm.dir);
+    fm_ask_preview();
+    fm_touch();
+    klog(L_DEBUG, "fm: %s -> %s", what, g_fm.dir);
+}
+
+static void fm_reread(void)
+{
+    unsigned long seq = 0;
+    int changed = fm_refresh(&g_fm, &seq);   /* fills seq — see fm_nav */
+    fm_nav(changed, seq, "refresh");
+}
+
+static void fm_preview_toggle(void)
+{
+    g_fm.preview_on = g_fm.preview_on ? 0 : 1;
+    if (!g_fm.preview_on && g_fm.focus == FM_FOCUS_PREVIEW)
+        g_fm.focus = FM_FOCUS_LIST;
+    fm_touch();          /* the half-split changes: the browser takes the whole band back */
+    fm_ask_preview();
+}
+
+/* Enter on a file: type its path at the shell prompt, WITHOUT a newline. Kai-Term does not guess what
+   "open" means for a file and never runs one — the user adds the command, or presses Enter themselves.
+   Same quoting as the cd line, so a path with spaces or apostrophes arrives intact. */
+static void fm_send_path(void)
+{
+    Term *t = cur_term();
+    Pty *p = cur_pty();
+    if (!t || !p)
+        return;
+    char path[FM_PATH_MAX];
+    if (!fm_entry_path(&g_fm, fm_sel(&g_fm), path, sizeof path))
+        return;
+    char cmd[FM_PATH_MAX + 8];
+    size_t n = shell_quote(cmd, sizeof cmd, path);
+    if (!n)
+        return;
+    pty_write(p, cmd, n);
+    klog(L_DEBUG, "fm: typed the selected path at the prompt: %s", path);
+}
+
+/* The selection moved (key, click or wheel): the preview has to follow it. fm_select() already marked
+   the model dirty, so the frame path repaints; only the preview request is issued here. */
+static void fm_sel_changed(void)
+{
+    fm_ask_preview();
+    W.dirty = 1;
+}
+
+/* The band's own keys, matched ONLY while the band owns the keyboard. That gate is what makes bare `Up`,
+   `r` or `Escape` safe bindings: with the file manager off, or with the terminal focused, those same
+   keys reach the PTY exactly as they did before this feature existed.
+   Three states, not two, because "I did not handle this" and "I handled it once" are different answers
+   and the caller must not send the key to the shell for either of the latter:
+     -1  not one of the band's keys — the caller carries on and the key reaches the PTY
+      0  handled, and must NOT auto-repeat (open, parent, refresh, preview, hidden, quit)
+      1  handled, and holding it should keep going (the movement keys — a file browser walks the
+         listing while an arrow is held, and the existing key-repeat machinery does it)
+   Returning 0 for the one-shots used to mean "not handled" to the caller, so Return on a file typed its
+   path AND sent a newline (the shell would then execute it), BackSpace went to the parent AND deleted a
+   character at the prompt, and `r` refreshed AND typed an `r`. Measured live, session 74. */
+static int fm_keys(xkb_keysym_t base, unsigned mods)
+{
+    if (!g_fm.on || g_fm.focus == FM_FOCUS_TERM)
+        return -1;
+    const FmKeys *k = &conf.fm_key;
+    unsigned long seq = 0;
+
+    if (bind_match(&k->up, base, mods))       { fm_move(&g_fm, -1); fm_sel_changed(); return 1; }
+    if (bind_match(&k->down, base, mods))     { fm_move(&g_fm, +1); fm_sel_changed(); return 1; }
+    if (bind_match(&k->pageup, base, mods))   { fm_page(&g_fm, -1); fm_sel_changed(); return 1; }
+    if (bind_match(&k->pagedown, base, mods)) { fm_page(&g_fm, +1); fm_sel_changed(); return 1; }
+    if (bind_match(&k->home, base, mods))     { fm_home(&g_fm); fm_sel_changed(); return 1; }
+    if (bind_match(&k->end, base, mods))      { fm_end(&g_fm); fm_sel_changed(); return 1; }
+    if (bind_match(&k->open, base, mods)) {
+        const FmEntry *e = fm_sel_entry(&g_fm);
+        /* fm_go_sel() resolves a symlink to a directory with stat() and descends; a dangling link or a
+           plain file returns 0 and nothing moves. The result is taken in its own statement because
+           fm_nav's `seq` argument must be read AFTER fm_go_sel filled it (see the fm_nav comment). */
+        if (e && (e->kind == FMK_DIR || e->kind == FMK_SYMLINK)) {
+            int changed = fm_go_sel(&g_fm, &seq);
+            fm_nav(changed, seq, "open");
+        } else {
+            fm_send_path();
+        }
+        return 0;
+    }
+    if (bind_match(&k->parent, base, mods)) {
+        int changed = fm_parent(&g_fm, &seq);   /* fills seq — see fm_nav */
+        fm_nav(changed, seq, "parent");
+        return 0;
+    }
+    if (bind_match(&k->refresh, base, mods))  { fm_reread(); return 0; }
+    if (bind_match(&k->preview, base, mods))  { fm_preview_toggle(); return 0; }
+    if (bind_match(&k->hidden, base, mods))   { fm_set_hidden(&g_fm, !g_fm.show_hidden);
+                                                fm_sel_changed(); return 0; }
+    if (bind_match(&k->quit, base, mods))     { fm_close(); return 0; }
+    return -1;
+}
+
+/* A click inside the band. The browser pane selects the entry drawn under the pointer and takes the
+   keyboard; the preview pane only takes the keyboard. Row -> entry is fm_row_pos(), which uses the
+   painter's own metrics, so a click always lands on the line it lands on — including in a pane too
+   short for its header and footer, where the entries start at row 0. */
+static void fm_pointer_select(int hit)
+{
+    if (hit == FM_HIT_PREVIEW) {
+        fm_focus_set(FM_FOCUS_PREVIEW);
+        return;
+    }
+    g_fm.focus = FM_FOCUS_LIST;
+    int ch = font.cell_h > 0 ? font.cell_h : 1;
+    int row = (W.ptr_y - g_layout.fm.list_y) / ch;
+    int pos = fm_row_pos(&g_fm, row);
+    if (pos < 0) {          /* the header, the footer, or empty space below the listing */
+        W.dirty = 1;
+        return;
+    }
+    fm_select(&g_fm, pos);
+    fm_sel_changed();
+    const FmEntry *e = fm_sel_entry(&g_fm);
+    klog(L_DEBUG, "fm: click row %d selects %s", row, e ? e->name : "?");
+}
+
+/* The wheel over the band walks the listing instead of scrolling the terminal's scrollback. Returns 1
+   when the wheel belonged to the file manager (so the caller must not scroll the session). */
+static int fm_wheel(void)
+{
+    if (!g_fm.on)
+        return 0;
+    int hit = layout_hit_fm(&g_layout, W.ptr_x, W.ptr_y);
+    if (hit == FM_HIT_NONE)
+        return 0;
+    fm_focus_set(hit == FM_HIT_LIST ? FM_FOCUS_LIST : FM_FOCUS_PREVIEW);
+    if (hit != FM_HIT_LIST)
+        return 1;
+    int steps = 0;
+    if (W.frame_discrete_seen)
+        steps = W.frame_discrete;                       /* wheel down = later entries */
+    else if (W.frame_has_axis)
+        steps = (int)W.frame_axis_val / imax_(font.cell_h, 1);
+    if (steps) {
+        fm_move(&g_fm, steps);
+        fm_sel_changed();
+    }
+    return 1;
+}
+
+/* Stop the worker and free everything the feature owns. Draining the pipe AFTER the join is what makes
+   this leak-free: the worker cannot write another answer once it is joined, so whatever it managed to
+   write is either already installed or freed here. */
+static void fm_shutdown(void)
+{
+    if (fm_worker_up) {
+        pthread_mutex_lock(&fm_mtx);
+        fm_quit = 1;
+        pthread_cond_broadcast(&fm_cv);
+        pthread_mutex_unlock(&fm_mtx);
+        pthread_join(fm_thr, NULL);
+        fm_worker_up = 0;
+    }
+    if (fm_pipe[0] >= 0) {
+        fm_drain_results();
+        if (g_ep >= 0)
+            epoll_ctl(g_ep, EPOLL_CTL_DEL, fm_pipe[0], NULL);
+        close(fm_pipe[0]);
+        fm_pipe[0] = -1;
+    }
+    if (fm_pipe[1] >= 0) {
+        close(fm_pipe[1]);
+        fm_pipe[1] = -1;
+    }
+    fm_destroy(&g_fm);
 }
 
 /* ---------------- wayland listeners ---------------- */
@@ -768,6 +1287,13 @@ static int send_key(uint32_t key, uint32_t serial)
     if (bind_match(&conf.key_next_tab, base, kbmods)) { tab_switch(mux_next(&mux)); return 0; }
     if (bind_match(&conf.key_prev_tab, base, kbmods)) { tab_switch(mux_prev(&mux)); return 0; }
     if (bind_match(&conf.key_toggle_layout, base, kbmods)) { layout_toggle(); return 0; }
+    /* The file manager. The three window-level bindings work from anywhere, because showing the band and
+       moving the keyboard between its regions is not something the band itself can do. The band's own
+       keys are matched only while it owns the keyboard (fm_keys checks that) — which is what makes the
+       bare `Up` / `r` / `Escape` defaults safe for the shell. */
+    if (bind_match(&conf.key_file_manager, base, kbmods)) { fm_toggle(); return 0; }
+    if (bind_match(&conf.key_fm_focus, base, kbmods))     { fm_focus_set(FM_FOCUS_LIST); return 0; }
+    if (bind_match(&conf.key_fm_release, base, kbmods))   { fm_focus_set(FM_FOCUS_TERM); return 0; }
     /* key_tab_prefix + a digit jumps straight to that tab (1-based, like every other terminal).
        Digits are the one case the KeyBind fields cannot express, so this shortcut is driven by the
        modifier list alone. The digit is taken from the key's LEVEL-0 keysym, NOT from `base`: on a US
@@ -805,6 +1331,12 @@ static int send_key(uint32_t key, uint32_t serial)
         if (base == XKB_KEY_C) { selection_copy(serial); return 0; }
         if (base == XKB_KEY_V) { clipboard_paste(); return 0; }
     }
+    /* The band's own keys, matched only while it owns the keyboard (see fm_keys). Before the PTY paths,
+       so a key the file manager uses never reaches the shell and never snaps the terminal's view. A
+       handled key returns 0 or 1 here (one-shot / repeatable); only -1 means "not the band's". */
+    int fmk = fm_keys(base, kbmods);
+    if (fmk >= 0)
+        return fmk;
     /* any other key sent to the PTY returns the view to the live bottom */
     snap_to_live(cur_term());
 
@@ -1108,6 +1640,25 @@ static void ptr_button(void *d, struct wl_pointer *p, uint32_t serial, uint32_t 
         return;
     }
 
+    /* The file-manager band is chrome, like the bar: a click there selects an entry or moves the
+       keyboard, and it never reaches the application (not even when the application grabbed the mouse)
+       and never starts a text selection. Checked before the mouse-reporting branch for exactly the bar's
+       reason — an application must not be able to eat the browser the user is looking at. */
+    if (g_fm.on) {
+        int hit = layout_hit_fm(&g_layout, W.ptr_x, W.ptr_y);
+        if (hit != FM_HIT_NONE) {
+            W.selecting = 0;
+            if (pressed)
+                fm_pointer_select(hit);
+            W.dirty = 1;
+            return;
+        }
+        /* A click in a terminal pane gives the keyboard back to the terminal, so the pointer and the
+           keyboard never disagree about where the next keystroke goes. */
+        if (pressed && layout_hit_pane(&g_layout, W.ptr_x, W.ptr_y) >= 0)
+            fm_focus_set(FM_FOCUS_TERM);
+    }
+
     /* A click inside a pane that is NOT the visible session focuses that session first, so the cell the
        pointer maps to is the cell drawn under it (W.gx/W.gy follow the visible session's pane). */
     if (pressed) {
@@ -1203,15 +1754,17 @@ static void ptr_scroll_done(void *d, struct wl_pointer *p)
 {
     (void)d; (void)p;
     if (!(cur_term()->mouse_mode & (MOUSE_PRESS | MOUSE_DRAG))) {
-        double delta_lines = 0.0;   /* + = scroll up (into history) */
-        if (W.frame_discrete_seen)
-            delta_lines = -(double)W.frame_discrete * SCROLL_LINES_PER_DETENT;
-        else if (W.frame_has_axis) {
-            int ch = font.cell_h > 0 ? font.cell_h : 1;
-            delta_lines = -W.frame_axis_val / (double)ch;
+        if (!fm_wheel()) {
+            double delta_lines = 0.0;   /* + = scroll up (into history) */
+            if (W.frame_discrete_seen)
+                delta_lines = -(double)W.frame_discrete * SCROLL_LINES_PER_DETENT;
+            else if (W.frame_has_axis) {
+                int ch = font.cell_h > 0 ? font.cell_h : 1;
+                delta_lines = -W.frame_axis_val / (double)ch;
+            }
+            if (delta_lines != 0.0)
+                scroll_apply(delta_lines);
         }
-        if (delta_lines != 0.0)
-            scroll_apply(delta_lines);
     }
     W.frame_axis_val = 0;
     W.frame_discrete = 0;
@@ -1769,6 +2322,18 @@ int main(int argc, char **argv)
     }
     klog(L_INFO, "shell starts in %s", wdir);
 
+    /* The file manager's model starts in the same directory the shell starts in, so the browser and the
+       prompt agree before the user moves either. The worker thread is NOT started here: it comes up the
+       first time the band is opened (fm_open), or below when `file_manager = 1` asks for it at startup. */
+    fm_init(&g_fm, wdir);
+    g_fm.on = conf.fm_on ? 1 : 0;
+    /* The shell starts in wdir, so that is where it already is — the first navigation must send a cd,
+       a refresh must not. */
+    snprintf(fm_last_cd, sizeof fm_last_cd, "%s", g_fm.dir);
+    g_fm.preview_on = conf.fm_preview ? 1 : 0;
+    g_fm.show_hidden = conf.fm_show_hidden ? 1 : 0;
+    g_fm.focus = g_fm.on ? FM_FOCUS_LIST : FM_FOCUS_TERM;
+
     if (font_init(&font, conf.font, conf.font_size) < 0)
         return 1;
 
@@ -1791,7 +2356,7 @@ int main(int argc, char **argv)
        linked test can prove the two agree. */
     int init_w, init_h;
     layout_initial_size(conf.cols, conf.rows, font.cell_w, font.cell_h, conf.padding, PANE_GAP,
-                        conf.tab_bar, &init_w, &init_h);
+                        conf.tab_bar, conf.fm_on, conf.fm_rows, &init_w, &init_h);
 
     if (wayland_setup(init_w, init_h) < 0)
         return 1;
@@ -1854,6 +2419,18 @@ int main(int argc, char **argv)
 
     wl_flush();
     W.running = 1;
+
+    /* `file_manager = 1` in the config: the band is up from the first frame, so its first listing is
+       requested here — once the worker exists and its result fd is part of the loop below. */
+    if (g_fm.on) {
+        if (fm_worker_start()) {
+            unsigned long seq = 0;
+            fm_refresh(&g_fm, &seq);
+            fm_ask(FMQ_SCAN, g_fm.dir, seq);
+            fm_ask_preview();
+        }
+        fm_touch();
+    }
 
     static uint8_t rbuf[65536];
     struct epoll_event events[8];
@@ -2038,6 +2615,10 @@ int main(int argc, char **argv)
                     paste_watch_disarm();
                     paste_flush();
                 }
+            } else if (fm_pipe[0] >= 0 && fd == fm_pipe[0]) {
+                /* a listing or a preview finished on the worker thread: install it (an answer about a
+                   directory or a file the user already left is dropped by fm_install_*()) */
+                fm_drain_results();
             } else if (pwfd >= 0 && fd == pwfd) {
                 /* the source went quiet without closing the pipe: deliver what we have */
                 uint64_t exp;
@@ -2074,6 +2655,7 @@ int main(int argc, char **argv)
         term_destroy(&tb->term);
     }
     font_destroy(&font);
+    fm_shutdown();
     close(tfd);
     close(sfd);
     if (pwfd >= 0)

@@ -7,6 +7,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>   /* mode_t, named by FmEntry/FmPreview — included rather than trusted to come
+                            in through string.h, which is what happens to work on glibc today */
 
 /* ---------- logging ---------- */
 enum { L_ERROR = 0, L_WARN, L_INFO, L_DEBUG };
@@ -406,6 +408,22 @@ typedef struct {
    modifiers only. Both are pure string handling, so tests/test_vt.c can check them without a display. */
 int keybind_parse(const char *spec, KeyBind *out);
 int keymods_parse(const char *spec, unsigned *mods);
+/* The same parser, but an UNMODIFIED key is allowed. Only for the file manager's own keys: they are
+   looked at ONLY while the file manager owns the keyboard, so `Up` cannot swallow the shell's typing —
+   with the file manager off, or with the terminal focused, that same key still reaches the PTY. */
+int keybind_parse_plain(const char *spec, KeyBind *out);
+
+/* The keys the file manager uses while it has the keyboard. Grouped in one struct because they are
+   twelve actions of one feature, and main.c matches them as a set. */
+typedef struct {
+    KeyBind up, down, pageup, pagedown, home, end;   /* move the selection */
+    KeyBind open;        /* Enter: descend into the selected directory */
+    KeyBind parent;      /* Backspace: go to the parent directory */
+    KeyBind refresh;     /* re-read the current directory */
+    KeyBind preview;     /* show / hide the preview pane */
+    KeyBind hidden;      /* show / hide dotfiles */
+    KeyBind quit;        /* close the file manager */
+} FmKeys;
 
 /* ---------- config ---------- */
 typedef struct Config {
@@ -450,6 +468,21 @@ typedef struct Config {
     int  tab_bar;
     int  split_max;
     KeyBind key_toggle_layout;
+    /* ---- the in-window file manager (src/fm.c; its band is laid out by src/layout.c) ----
+       fm_on: start with the file manager shown. Default off — a user who never presses the toggle sees
+       exactly the terminal of earlier sessions, and closing the file manager returns to that state.
+       fm_rows: how many CELL ROWS the band asks for (layout.c clamps it again against the window).
+       fm_preview: the preview pane is shown (it can also be toggled at runtime). fm_show_hidden:
+       dotfiles are part of the listing from the start. fm_follow: navigating into a directory also
+       sends `cd <path>` to the shell, so the prompt lands where the browser is looking. */
+    int  fm_on, fm_rows, fm_preview, fm_show_hidden, fm_follow;
+    /* The window-level shortcuts; these carry modifiers like every other terminal binding. */
+    KeyBind key_file_manager;    /* show / hide the file manager */
+    KeyBind key_fm_focus;        /* the keyboard drives the file-manager panes */
+    KeyBind key_fm_release;      /* the keyboard drives the terminal pane again */
+    /* The file manager's own keys. Unbinding one (`fm_key_open = none`) leaves that action
+       unavailable rather than falling back to the default — same rule as the tab bindings. */
+    FmKeys fm_key;
     int  loglevel;
 } Config;
 
@@ -562,6 +595,31 @@ typedef struct {
     char label[BAR_LABEL_MAX];
 } BarItem;
 
+/* The file-manager band: the strip of the grid area the browser and the preview take, ABOVE the
+   terminal pane. Decided here and nowhere else, for the usual reason — the painted cells, the pointer
+   hit test and fm_set_size() must all agree on how many columns and rows each pane has.
+   `on` is 0 when the window is too short to hold the band AND a usable terminal pane: the terminal wins,
+   exactly as it wins over the tab bar. cols/rows come from term_grid_geometry() on each rect, so the
+   leftover pixels sit at the right/bottom of each pane and `col = (ptr_x - list_x) / cell_w` is exact. */
+typedef struct {
+    int on;            /* the band is drawn at all */
+    int list_x, list_y, list_w, list_h;
+    int list_cols, list_rows;
+    int prev_on;       /* the preview pane is shown (it can be toggled away) */
+    int prev_x, prev_y, prev_w, prev_h;
+    int prev_cols, prev_rows;
+} FmGeom;
+
+/* layout_hit_fm() answers. FM_HIT_NONE means the point is on a terminal pane, the bar, a margin or a gap. */
+enum { FM_HIT_NONE = 0, FM_HIT_LIST = 1, FM_HIT_PREVIEW = 2 };
+
+/* The band's height is asked for in CELL ROWS (Config.fm_rows) because that is the unit the panes are
+   painted in. Both bounds and the terminal pane's minimum are layout rules, so they live here, not in
+   config.c: clamping in config.c would let a different caller ask for a 1-row band and get one. */
+#define FM_ROWS_MIN 3
+#define FM_ROWS_MAX 64
+#define FM_TERM_MIN_ROWS 3    /* the terminal pane never shrinks below this many rows */
+
 typedef struct {
     int mode;          /* LAYOUT_TABS / LAYOUT_SPLIT */
     int bar_on;
@@ -572,6 +630,7 @@ typedef struct {
     BarItem item[TAB_MAX];
     int npane;
     PaneGeom pane[TAB_MAX];
+    FmGeom fm;         /* the file-manager band; pane[] is what is LEFT of the grid area after it */
 } Layout;
 
 /* What the caller knows; layout_compute turns it into a Layout. */
@@ -590,6 +649,9 @@ typedef struct {
     int ntab, active;
     int split_max;     /* panes side by side at most (>= 1) */
     int bar;           /* BAR_OFF / BAR_AUTO / BAR_ALWAYS */
+    int fm_on;         /* the file manager is shown */
+    int fm_preview_on; /* its preview pane is shown too */
+    int fm_rows;       /* how many cell rows the band asks for (clamped to FM_ROWS_MIN..MAX here) */
     TabInfo tab[TAB_MAX];
 } LayoutReq;
 
@@ -598,6 +660,10 @@ void layout_compute(const LayoutReq *rq, Layout *out);
    point is in the margin, the gap or outside. */
 int layout_hit_bar(const Layout *l, int px, int py);
 int layout_hit_pane(const Layout *l, int px, int py);
+/* FM_HIT_LIST / FM_HIT_PREVIEW when the point is over one of the file-manager panes, FM_HIT_NONE
+   otherwise (including when the band is off). Checked BEFORE layout_hit_pane(): with the band on, the
+   terminal pane starts below it, and a click inside the band must never reach the shell. */
+int layout_hit_fm(const Layout *l, int px, int py);
 /* -1 when that session is not drawn in this layout (a hidden tab in tab mode, or a session outside the
    visible pane window in split mode). */
 int layout_pane_of_tab(const Layout *l, int tab);
@@ -612,7 +678,221 @@ void layout_grid_size(const Layout *l, int *cols, int *rows);
    writing cell_w there instead leaves the grid one row short of the configured `rows` for every non-square
    cell — a mistake a check in tests/test_vt.c catches only if the arithmetic is in a module the tests link. */
 void layout_initial_size(int cols, int rows, int cell_w, int cell_h, int pad, int gap, int bar,
-                         int *win_w, int *win_h);
+                         int fm_on, int fm_rows, int *win_w, int *win_h);
+
+/* ---------- file manager (src/fm.c) ----------
+   An in-window browser: a listing of one directory, a context-sensitive preview of the selected entry,
+   and the ordinary terminal below them. fm.c is MODEL ONLY — no Wayland, no EGL, no threads, no
+   rendering. That is what makes the feature testable (tests/test_fm.c drives a real directory tree
+   headlessly) and what makes it non-blocking: fm_scan_build() and fm_preview_build() are pure functions
+   of a path that touch nothing but malloc and the filesystem, so src/main.c can run them on a worker
+   thread and install the answer back on the main thread. The two panes are painted into ordinary Cell
+   grids, which is what makes them read as part of the terminal: the renderer draws them with the same
+   font, colours and passes it uses for a session's grid. */
+
+#define FM_PATH_MAX   4096            /* a directory or file path (matches Config.working_dir) */
+#define FM_NAME_MAX   256             /* one entry's name (NAME_MAX is 255 on Linux) */
+#define FM_ERR_MAX    256             /* one human-readable error line */
+#define FM_ENTRIES_MAX 8192           /* entries one listing keeps; the rest are dropped with a warning */
+#define FM_PREVIEW_BYTES (256u * 1024u)   /* bytes of a text preview read from disk */
+#define FM_PREVIEW_DIR_MAX 512        /* entries shown in a directory preview */
+#define FM_PREVIEW_FILE_MAX (16u * 1024u * 1024u)  /* largest image file a preview will read */
+#define FM_META_LINES 16              /* metadata lines one preview shows */
+#define FM_META_WIDTH 128             /* bytes per metadata line */
+
+/* Accent colours for the two panes, in the header so tests/test_fm.c can pin the colour a token got.
+   They are ACCENTS only: the base ink and paper are the configured Config.fg/Config.bg, passed to
+   fm_paint(), so the file manager matches the terminal. Chosen to read on a dark background and to
+   agree with what ls and editors do (directory blue, executable green, string green, comment grey). */
+#define FM_DIR_COL   0xff6cb6ffu   /* directories */
+#define FM_LINK_COL  0xff3ddad7u   /* symlinks */
+#define FM_EXEC_COL  0xffa5d6a7u   /* owner-executable files */
+#define FM_ERR_COL   0xfff26d78u   /* anything that failed */
+#define FM_KEY_COL   0xff6cb6ffu   /* keyword, section, heading */
+#define FM_STR_COL   0xffc3e88du   /* string literal */
+#define FM_NUM_COL   0xfff78c6cu   /* number, shell variable */
+#define FM_CMT_COL   0xff8b949eu   /* comment */
+#define FM_PP_COL    0xffd2a8ffu   /* preprocessor, decorator, tag */
+#define FM_TYPE_COL  0xff4ec9b0u   /* type name, json key, make target */
+
+/* What a listing entry IS. Decided from lstat(), so a symlink is reported as a symlink and never as
+   whatever it points at (a dangling link must still be listable). */
+enum { FMK_DIR = 0, FMK_FILE, FMK_SYMLINK, FMK_FIFO, FMK_SOCKET, FMK_DEVICE, FMK_MISSING };
+
+/* What the preview pane shows for the selected entry. */
+enum { FMP_NONE = 0, FMP_DIR, FMP_TEXT, FMP_IMAGE, FMP_META, FMP_EMPTY };
+
+/* Which region the keyboard drives while the file manager is on. FM_FOCUS_TERM is the state the
+   terminal is in when the file manager is off, so closing it is just focus = FM_FOCUS_TERM + on = 0. */
+enum { FM_FOCUS_TERM = 0, FM_FOCUS_LIST, FM_FOCUS_PREVIEW };
+
+/* Languages the text preview can colour. Chosen from the file name; FM_LANG_NONE means the text is
+   shown in the plain foreground colour. */
+enum { FM_LANG_NONE = 0, FM_LANG_C, FM_LANG_PY, FM_LANG_SH, FM_LANG_JSON, FM_LANG_MD,
+       FM_LANG_MAKE, FM_LANG_INI, FM_LANG_HTML, FM_LANG_RS, FM_LANG_JS, FM_LANG_GO,
+       FM_LANG_CSS, FM_LANG_YAML, FM_LANG_N };
+
+/* One entry of a directory listing. Only the NAME is stored: a path would make one entry 4 KB and a
+   capped listing of 8192 entries 32 MB, while fm_entry_path() rebuilds the full path in a caller's
+   buffer in one snprintf. */
+typedef struct {
+    char name[FM_NAME_MAX];
+    uint8_t kind;        /* FMK_* */
+    uint8_t hidden;      /* name starts with '.' — kept in the listing, hidden from the view */
+    uint8_t exec;        /* owner-executable regular file: drawn like one */
+    mode_t mode;
+    uint64_t size;
+    int64_t mtime;       /* seconds, st_mtime */
+} FmEntry;
+
+/* The answer to one listing request. Built off the main thread, installed on it. `seq` is the request
+   id the caller passed in; an answer whose seq is no longer the newest one is dropped, which is what
+   keeps a slow scan of a directory the user already left from replacing the listing on screen. */
+typedef struct {
+    char dir[FM_PATH_MAX];
+    FmEntry *ent;        /* malloc'd, n entries, sorted (directories first) */
+    int n;
+    int truncated;       /* the directory holds more than max_entries */
+    char err[FM_ERR_MAX];
+    unsigned long seq;
+} FmScan;
+
+/* The answer to one preview request. Only the fields of the chosen `kind` are filled; `meta` is filled
+   for every kind, because the header of every preview shows the same facts. */
+typedef struct {
+    char path[FM_PATH_MAX];
+    int kind;            /* FMP_* */
+    /* FMP_DIR */
+    FmEntry *ent;
+    int n;
+    /* FMP_TEXT */
+    char *text;          /* malloc'd, NUL-terminated, control characters already replaced */
+    size_t len;
+    int lang;            /* FM_LANG_* */
+    /* FMP_IMAGE */
+    uint8_t *rgba;       /* malloc'd RGBA8 (NOT premultiplied — the caller does that) */
+    int w, h;
+    char fmt[8];         /* "png" / "jpg" / "gif" / "webp", from the bytes, not the name */
+    /* every kind */
+    int truncated;       /* what the entry holds is bigger than what a preview reads: more text than
+                            FM_PREVIEW_BYTES, more directory entries than FM_PREVIEW_DIR_MAX, or an
+                            image file bigger than FM_PREVIEW_FILE_MAX */
+    char meta[FM_META_LINES][FM_META_WIDTH];
+    int nmeta;
+    char err[FM_ERR_MAX];
+    unsigned long seq;      /* the request this answers */
+    unsigned long uid;      /* unique per built preview, never reused: the renderer keys the preview's
+                               GL texture on this, so a re-installed preview re-uploads and a stale one
+                               can never be painted from a recycled malloc address. */
+} FmPreview;
+
+/* One painted pane. The renderer walks it exactly like a session grid (row-major, cell (x,y) at
+   cell[y*cols+x]), so the file manager needs no new drawing code path beyond "a grid with no cursor
+   and no selection". */
+typedef struct {
+    Cell *cell;
+    int cols, rows;
+} FmPane;
+
+typedef struct {
+    int on;              /* the file manager is shown at all */
+    int focus;           /* FM_FOCUS_* */
+    int preview_on;      /* the preview pane is shown (it can be toggled away) */
+    int show_hidden;     /* dotfiles are part of the view */
+    char dir[FM_PATH_MAX];
+    char err[FM_ERR_MAX];
+
+    FmEntry *ent;        /* the installed listing (ecap allocated entries) */
+    int n, ecap;
+    int *vis;            /* vis[0..nvis-1] index ent[]: the view after the hidden filter */
+    int nvis, vcap;
+    int truncated;       /* the listing is not the whole directory */
+
+    int sel, top;        /* selected position in vis[], first visible row of the list pane */
+    int list_cols, list_rows, prev_cols, prev_rows;   /* what the layout asked for */
+    FmPane list, prev;   /* what the renderer draws */
+
+    unsigned long seq;       /* monotonic request-id issuer, SHARED by both kinds so an id can never
+                                name a listing and a preview at once */
+    unsigned long scan_req;  /* id of the newest LISTING request (0 = none issued yet) */
+    unsigned long pv_req;    /* id of the newest PREVIEW request (0 = none issued yet) */
+    int have_listing;        /* ent[] really holds a listing of fm->dir */
+    FmPreview *pv;       /* the installed preview, owned here */
+    int dirty;           /* the panes must be repainted */
+} FileMgr;
+
+void fm_init(FileMgr *fm, const char *dir);
+void fm_destroy(FileMgr *fm);
+/* The size the layout gave the two panes. Reallocs and blanks the cell grids when it changes. */
+void fm_set_size(FileMgr *fm, int list_cols, int list_rows, int prev_cols, int prev_rows);
+
+/* ---- listing: build (worker thread) then install (main thread) ---- */
+FmScan *fm_scan_build(const char *dir, unsigned long seq);
+/* The same with an explicit entry cap, so a test can pin the truncation behaviour without creating
+   FM_ENTRIES_MAX files. fm_scan_build() is this with FM_ENTRIES_MAX. */
+FmScan *fm_scan_build_n(const char *dir, unsigned long seq, int max_entries);
+void fm_scan_free(FmScan *s);
+/* Take ownership of the answer. Returns 0 and frees it when it answers a request that is no longer the
+   newest one (the user navigated away while the scan ran). */
+int  fm_install_scan(FileMgr *fm, FmScan *s);
+/* Ask for a listing of dir (0 = unchanged, already showing it). Bumps fm->seq; the caller hands the new
+   seq to the worker. */
+int  fm_go(FileMgr *fm, const char *dir, unsigned long *seq);
+int  fm_go_sel(FileMgr *fm, unsigned long *seq);    /* descend into the selected directory */
+int  fm_parent(FileMgr *fm, unsigned long *seq);
+int  fm_refresh(FileMgr *fm, unsigned long *seq);
+
+/* ---- selection ---- */
+void fm_select(FileMgr *fm, int pos);
+void fm_move(FileMgr *fm, int delta);   /* +1 down, -1 up; keeps the selection inside the view */
+void fm_page(FileMgr *fm, int pages);   /* one page = the list pane's entry rows */
+void fm_home(FileMgr *fm);
+void fm_end(FileMgr *fm);
+int  fm_count(const FileMgr *fm);       /* entries in the view */
+int  fm_sel(const FileMgr *fm);         /* selected position, -1 when the view is empty */
+const FmEntry *fm_sel_entry(const FileMgr *fm);
+int  fm_entry_path(const FileMgr *fm, int pos, char *out, size_t cap);
+/* Show or hide dotfiles. Rebuilds the view from the listing already in memory — no second scan of the
+   disk — and keeps the selection a position in the new view. */
+void fm_set_hidden(FileMgr *fm, int show);
+/* Which entry of the view the row of the LIST PANE shows, or -1 when that row is chrome (the header or
+   the footer) or past the end. The painter owns the row layout, so the hit test lives next to it:
+   main.c must not re-derive where the entries start. */
+int  fm_row_pos(const FileMgr *fm, int row);
+
+/* ---- preview: build (worker thread) then install (main thread) ---- */
+FmPreview *fm_preview_build(const char *path, unsigned long seq);
+void fm_preview_free(FmPreview *p);
+int  fm_install_preview(FileMgr *fm, FmPreview *pv);   /* same stale-answer rule as fm_install_scan */
+/* The path that SHOULD be previewed right now (the selected entry, or the current directory when
+   nothing is selected). 1 when it differs from what is installed, and then *seq gets the id to ask
+   the worker for and path the path to read. */
+int  fm_preview_request(FileMgr *fm, unsigned long *seq, char *path, size_t cap);
+
+/* ---- painting ---- */
+/* Fill both cell grids from the current state. fg/bg are the CONFIGURED colours, so the file manager
+   matches the terminal instead of inventing a palette. */
+void fm_paint(FileMgr *fm, uint32_t fg, uint32_t bg);
+/* Where the preview picture goes inside the preview pane, in CELLS, aspect ratio preserved for these
+ * cell dimensions: the renderer draws the quad and fm.c decides the box, because the box is what a test
+ * can check and what keeps a 3000x200 photo from being stretched to the pane. px_w/px_h are the same box
+ * in PIXELS — the cell box is that plus up to one cell of ceil() slack, and drawing the cell box would
+ * stretch the picture by the slack. */
+void fm_image_fit(const FileMgr *fm, int cell_w, int cell_h,
+                  int *col, int *row, int *cols, int *rows, int *px_w, int *px_h);
+
+/* ---- small shared formatters (also used by the tests) ---- */
+void fm_human_size(uint64_t n, char *out, size_t cap);
+void fm_human_time(int64_t t, char *out, size_t cap);
+void fm_mode_string(mode_t m, char out[11]);   /* "-rwxr-xr-x" / "drwxr-xr-x" / "lrwxrwxrwx" */
+int  fm_lang_for_path(const char *path);       /* FM_LANG_* from a file name */
+
+/* Text preview colouring. State carries from line to line, because a C block comment does not stop at
+ * the end of a line. fg has one entry per BYTE of line (all bytes of one codepoint get the same colour,
+ * so the painter takes the colour of the lead byte). */
+typedef struct { int lang; int in_block; } FmHl;
+void fm_hl_init(FmHl *st, int lang);
+void fm_hl_line(FmHl *st, const char *line, size_t len, uint32_t *fg, uint32_t base);
 
 /* ---------- font / glyph atlas ---------- */
 typedef struct Glyph {
@@ -713,6 +993,15 @@ typedef struct Render {
     int nimgtex, imgtex_cap;
     int img_frame;               /* bumped once per frame; ImgTex.seen == img_frame means "used this
                                     frame", which is how textures of pictures that left the screen go */
+    /* The file manager's preview picture: at most one at a time, so it gets one texture instead of a
+       cache. Re-uploaded when FmPreview.uid changes (a new preview was installed) or when the pixels
+       were resized. fm_px is the premultiplied copy the shader wants — img.c hands out plain RGBA and
+       the preview model keeps it that way so its tests can compare decoded bytes. */
+    unsigned fm_tex;
+    unsigned long fm_tex_uid;
+    int fm_tex_w, fm_tex_h;
+    uint8_t *fm_px;
+    int fm_px_cap;
     void *set_div;               /* glVertexAttribDivisorARB or NULL */
     void *draw_inst;             /* glDrawArraysInstancedARB or NULL */
     int inst_ok;                 /* 1 when both ARB instancing extensions are available */
@@ -727,6 +1016,31 @@ typedef struct Render {
     void *nwin;                  /* EGLNativeWindowType (wl_egl_window) */
 } Render;
 
+/* ---------- image decoding (src/img.c) ----------
+   The one place bytes become pixels. Both producers share it: src/vt.c (the kitty graphics protocol,
+   where an application transmits a picture inline) and src/fm.c (the file manager's preview pane, where
+   the picture is read from disk). Output is always RGBA8, never premultiplied — the caller premultiplies
+   when it knows where the pixels are going (see img_premultiply and the renderer's a_glyph == 3 path).
+   PNG/JPEG/WebP use the system libraries; GIF is decoded in-tree (giflib is not a dependency). */
+
+/* Caps every decoder enforces, so neither a hostile escape stream nor a 30 MB photo can make a frame
+   late or exhaust the machine. One definition, because the graphics path and the preview path must
+   refuse the same picture. */
+#define IMG_DIM_MAX  4096            /* accepted px per side */
+#define IMG_PIX_MAX  (16LL << 20)    /* accepted pixels per image */
+
+/* 1 when these bytes are a format img_decode_mem can read. `kind` (8 bytes, may be NULL) comes back as
+   "png" / "jpg" / "gif" / "webp", or "" when nothing matched. Recognition is by the bytes themselves,
+   never by a file name or by what a protocol's f= field claims. */
+int img_sniff(const uint8_t *mem, size_t n, char *kind);
+uint8_t *img_decode_png(const uint8_t *mem, size_t n, int *w, int *h);
+/* Sniff, then decode. Returns malloc'd RGBA8 (w*h*4) or NULL; the size outputs are 0 on failure.
+   `kind` (8 bytes or NULL) reports which decoder ran, which is what the preview pane shows for an image. */
+uint8_t *img_decode_mem(const uint8_t *mem, size_t n, int *w, int *h, char *kind);
+/* c + bg*(1-c.a) is how the shader composites every texel (no GL blending, and a Wayland EGL buffer is
+   premultiplied), so every picture must pass through here once. */
+void img_premultiply(uint8_t *rgba, long long npix);
+
 /* ---------- image model helpers (src/vt.c) ---------- */
 void term_set_cell_px(Term *t, int w, int h);
 /* Fill out[] with the images of this session that are at least partly inside the viewport,
@@ -738,13 +1052,16 @@ int  term_image_count(const Term *t);
 /* ---------- renderer (EGL + GL) ---------- */
 int  render_init(Render *r, void *wl_display, void *egl_window, int w, int h, float opacity,
                  uint32_t bg, uint32_t fg);
-/* Draw one frame: the tab bar (if the layout says so) plus every pane's grid. Two vertex batches
-   (backgrounds, then bands + glyphs + chrome) with one draw call per application picture between them
-   — see the header comment of src/render.c for why the frame cannot be a single call.
+/* Draw one frame: the tab bar (if the layout says so), every pane's grid, and the file-manager band if
+   the layout has one. Two vertex batches (backgrounds, then bands + glyphs + chrome) with one draw call
+   per application picture between them — see the header comment of src/render.c for why the frame cannot
+   be a single call.
    `lay` comes from layout_compute() and carries every rectangle; `terms` is indexed by TAB index, so the
-   grid of pane p is terms[lay->pane[p].tab] (NULL draws an empty pane). Returns 1 when a new buffer was
-   attached, 0 when the swap failed. */
-int render_draw(Render *r, Font *f, const Layout *lay, Term *const *terms);
+   grid of pane p is terms[lay->pane[p].tab] (NULL draws an empty pane). `fm` is the file manager whose
+   cell grids the layout laid out (NULL or fm->on == 0 draws no band); its painted panes go through the
+   same two passes as a session grid, and its preview picture is drawn between the batches like any other
+   picture. Returns 1 when a new buffer was attached, 0 when the swap failed. */
+int render_draw(Render *r, Font *f, const Layout *lay, Term *const *terms, const FileMgr *fm);
 void render_resize(Render *r, int w, int h);
 void render_destroy(Render *r);
 

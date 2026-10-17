@@ -1660,6 +1660,23 @@ int main(void)
         CHECK(!keybind_parse("Ctrl", &KB), "keybind: modifiers with no key is refused");
         CHECK(!keybind_parse("", &KB), "keybind: an empty spec is refused");
 
+        /* The file manager's keys go through the same parser with the no-modifier rule lifted: they are
+           only matched while the file manager owns the keyboard, so a bare `Up` cannot steal the shell's
+           arrow keys. Everything else the strict parser checks still applies. */
+        CHECK(keybind_parse_plain("Up", &KB) && KB.set == 1 && KB.mods == 0 && KB.sym == KB_KEY_Up,
+              "keybind plain: a bare Up is usable (and carries no modifier)");
+        CHECK(keybind_parse_plain("r", &KB) && KB.sym == 'r' && KB.mods == 0,
+              "keybind plain: a bare letter is usable");
+        CHECK(keybind_parse_plain(".", &KB) && KB.sym == '.', "keybind plain: punctuation is usable");
+        CHECK(keybind_parse_plain("Ctrl+Shift+Up", &KB) && KB.mods == (KB_CTRL | KB_SHIFT),
+              "keybind plain: modifiers are still accepted");
+        CHECK(!keybind_parse_plain("Ctrl+Bogus", &KB) && KB.set == 0,
+              "keybind plain: an unknown key name is still refused");
+        CHECK(!keybind_parse_plain("Ctrl+Shift+T+U", &KB),
+              "keybind plain: two keys in one spec is still refused");
+        CHECK(!keybind_parse_plain("Ctrl", &KB), "keybind plain: modifiers with no key is still refused");
+        CHECK(!keybind_parse_plain("", &KB), "keybind plain: an empty spec is still refused");
+
         unsigned MM = 7;
         CHECK(keymods_parse("Ctrl+Shift", &MM) && MM == (KB_CTRL | KB_SHIFT), "keymods: Ctrl+Shift");
         MM = 7;
@@ -1768,6 +1785,81 @@ int main(void)
             config_load(&c, path);
             CHECK(c.tab_bar == BAR_AUTO, "config: an unknown tab_bar value keeps the current one");
             CHECK(c.split_max == TAB_MAX, "config: split_max clamps to TAB_MAX");
+            remove(path);
+        }
+    }
+
+    /* --- config: the file manager (file_manager / fm_rows / fm_* bindings) ----------------------
+       Off by default, because the feature must not change what a user who never touches it sees. The
+       twelve fm_key_* bindings are the ones allowed to be bare keys (keybind_parse_plain). */
+    {
+        Config c;
+        const char *path = "/tmp/kterm_test_config6.conf";
+        config_default(&c);
+        CHECK(c.fm_on == 0, "config: the file manager is off by default");
+        CHECK(c.fm_rows == 12, "config: the band asks for 12 rows by default");
+        CHECK(c.fm_preview == 1, "config: the preview pane is on by default");
+        CHECK(c.fm_show_hidden == 0, "config: dotfiles are hidden by default");
+        CHECK(c.fm_follow == 1, "config: the shell follows the browsed directory by default");
+        CHECK(c.key_file_manager.set && c.key_file_manager.sym == 'f' &&
+              c.key_file_manager.mods == (KB_CTRL | KB_SHIFT),
+              "config: the default file-manager toggle is Ctrl+Shift+F");
+        CHECK(c.key_fm_focus.set && c.key_fm_focus.sym == KB_KEY_Up &&
+              c.key_fm_focus.mods == (KB_CTRL | KB_SHIFT),
+              "config: Ctrl+Shift+Up focuses the file manager by default");
+        CHECK(c.key_fm_release.set && c.key_fm_release.sym == KB_KEY_Down &&
+              c.key_fm_release.mods == (KB_CTRL | KB_SHIFT),
+              "config: Ctrl+Shift+Down gives the keyboard back to the terminal");
+        CHECK(c.fm_key.up.set && c.fm_key.up.sym == KB_KEY_Up && c.fm_key.up.mods == 0,
+              "config: the default browser key is a bare Up");
+        CHECK(c.fm_key.open.set && c.fm_key.open.sym == KB_KEY_Return,
+              "config: Return opens a directory");
+        CHECK(c.fm_key.parent.set && c.fm_key.parent.sym == KB_KEY_BackSpace,
+              "config: Backspace goes to the parent directory");
+        CHECK(c.fm_key.quit.set && c.fm_key.quit.sym == KB_KEY_Escape,
+              "config: Escape closes the file manager");
+        CHECK(c.fm_key.hidden.set && c.fm_key.hidden.sym == '.', "config: dotfiles toggle on .");
+
+        FILE *f = fopen(path, "w");
+        CHECK(f != NULL, "config: temp config file writable (file manager settings)");
+        if (f) {
+            fputs("file_manager = on\nfm_rows = 6\nfm_preview = off\nfm_show_hidden = yes\n"
+                  "fm_follow = 0\nkey_file_manager = Alt+F\nkey_fm_focus = none\n"
+                  "fm_key_up = k\nfm_key_down = j\nfm_key_open = Enter\n", f);
+            fclose(f);
+            config_default(&c);
+            config_load(&c, path);
+            CHECK(c.fm_on == 1, "config: file_manager = on starts the feature shown");
+            CHECK(c.fm_rows == 6, "config: fm_rows read from the file");
+            CHECK(c.fm_preview == 0, "config: fm_preview = off hides the preview pane");
+            CHECK(c.fm_show_hidden == 1, "config: fm_show_hidden = yes lists dotfiles");
+            CHECK(c.fm_follow == 0, "config: fm_follow = 0 leaves the shell alone");
+            CHECK(c.key_file_manager.set && c.key_file_manager.sym == 'f' &&
+                  c.key_file_manager.mods == KB_ALT, "config: key_file_manager = Alt+F rebinds it");
+            CHECK(c.key_fm_focus.set == 0, "config: key_fm_focus = none unbinds the focus switch");
+            CHECK(c.fm_key.up.set && c.fm_key.up.sym == 'k' && c.fm_key.up.mods == 0,
+                  "config: fm_key_up = k rebinds the browser's up key");
+            CHECK(c.fm_key.down.sym == 'j', "config: fm_key_down = j");
+            CHECK(c.fm_key.open.sym == KB_KEY_Return, "config: fm_key_open = Enter (same keysym as Return)");
+            CHECK(c.fm_key.refresh.set && c.fm_key.refresh.sym == 'r',
+                  "config: a fm_key the file does not mention keeps its default");
+
+            f = fopen(path, "w");
+            fputs("fm_rows = 0\nfm_key_up = none\nfm_key_open = Ctrl+Shift+Nope\n", f);
+            fclose(f);
+            config_default(&c);
+            config_load(&c, path);
+            CHECK(c.fm_rows == FM_ROWS_MIN, "config: fm_rows = 0 clamps to the layout minimum");
+            CHECK(c.fm_key.up.set == 0, "config: fm_key_up = none unbinds that action");
+            CHECK(c.fm_key.open.set && c.fm_key.open.sym == KB_KEY_Return,
+                  "config: an unparseable fm_key keeps the default instead of disabling the action");
+
+            f = fopen(path, "w");
+            fputs("fm_rows = 99999\n", f);
+            fclose(f);
+            config_default(&c);
+            config_load(&c, path);
+            CHECK(c.fm_rows == FM_ROWS_MAX, "config: fm_rows clamps to the layout maximum");
             remove(path);
         }
     }
@@ -1936,7 +2028,7 @@ int main(void)
            catch that typo, because the two halves live in one module the tests link while main.c is in none
            of them. A non-square cell (8x17) is what makes the difference visible. */
         int iw, ih;
-        layout_initial_size(80, 30, 8, 17, 8, 8, BAR_ALWAYS, &iw, &ih);
+        layout_initial_size(80, 30, 8, 17, 8, 8, BAR_ALWAYS, 0, 0, &iw, &ih);
         CHECK(iw == 80 * 8 + 16 && ih == 30 * 17 + 16 + 17 + 8,
               "layout: the startup window is the grid + the margin + one bar ROW and its gap");
         lreq(&rq, LAYOUT_TABS, iw, ih, 8, 17, 8, 8, 1, 0, 4, BAR_ALWAYS);
@@ -1944,7 +2036,7 @@ int main(void)
         layout_grid_size(&L, &lcols, &lrows);
         CHECK(lcols == 80 && lrows == 30,
               "layout: a tab_bar = always startup really gets the configured cols x rows back");
-        layout_initial_size(80, 30, 8, 17, 8, 8, BAR_AUTO, &iw, &ih);
+        layout_initial_size(80, 30, 8, 17, 8, 8, BAR_AUTO, 0, 0, &iw, &ih);
         CHECK(iw == 80 * 8 + 16 && ih == 30 * 17 + 16,
               "layout: with tab_bar = auto the single starting session needs no bar row");
         lreq(&rq, LAYOUT_TABS, iw, ih, 8, 17, 8, 8, 1, 0, 4, BAR_AUTO);
@@ -1952,9 +2044,89 @@ int main(void)
         layout_grid_size(&L, &lcols, &lrows);
         CHECK(lcols == 80 && lrows == 30,
               "layout: a tab_bar = auto startup gets the configured cols x rows back too");
-        layout_initial_size(80, 30, 8, 8, 0, 0, BAR_ALWAYS, &iw, &ih);
+        layout_initial_size(80, 30, 8, 8, 0, 0, BAR_ALWAYS, 0, 0, &iw, &ih);
         CHECK(iw == 640 && ih == 248,
               "layout: padding 0 with a square cell gives the edge-to-edge startup size");
+
+        /* ---------- the file-manager band (Layout.fm) ----------
+           936x1002 px window, 8x17 cells, padding 8, gap 8, one session, bar auto (off with one tab):
+           the grid area is 920 x 986 px = 115 x 58 whole cells. A 12-row band is asked for. */
+        lreq(&rq, LAYOUT_TABS, 936, 1002, 8, 17, 8, 8, 1, 0, 4, BAR_AUTO);
+        rq.fm_on = 1; rq.fm_preview_on = 1; rq.fm_rows = 12;
+        layout_compute(&rq, &L);
+        CHECK(L.fm.on == 1 && L.fm.prev_on == 1, "fm layout: the band appears when it is asked for");
+        CHECK(L.fm.list_y == 8 && L.fm.list_h == 12 * 17,
+              "fm layout: the band starts at the top margin and is fm_rows cell rows tall");
+        CHECK(L.fm.list_x == 8 && L.fm.list_w == (920 - 8) / 2,
+              "fm layout: the browser takes the left half of the band");
+        CHECK(L.fm.prev_x == 8 + L.fm.list_w + 8 && L.fm.prev_w == 920 - 8 - L.fm.list_w &&
+              L.fm.prev_y == 8 && L.fm.prev_h == 12 * 17,
+              "fm layout: the preview takes the right half, one gap between, same height");
+        CHECK(L.fm.list_w + L.fm.prev_w + 8 == 920,
+              "fm layout: the two panes and the gap fill the band exactly (remainder on the right)");
+        CHECK(L.fm.list_cols == L.fm.list_w / 8 && L.fm.list_rows == 12 &&
+              L.fm.prev_cols == L.fm.prev_w / 8 && L.fm.prev_rows == 12,
+              "fm layout: each pane's cols x rows come from term_grid_geometry on its own rect");
+        CHECK(L.pane[0].y == 8 + 12 * 17 + 8 && L.pane[0].h == 986 - 12 * 17 - 8,
+              "fm layout: the terminal pane is what is left BELOW the band, gap between");
+        CHECK(L.pane[0].x == 8 && L.pane[0].w == 920,
+              "fm layout: the terminal pane keeps the full width - the band only costs height");
+        layout_grid_size(&L, &lcols, &lrows);
+        CHECK(lcols == L.pane[0].cols && lrows == L.pane[0].rows && lrows == 45 && lcols == 115,
+              "fm layout: every session is sized to the TERMINAL pane, not to the window");
+        CHECK(layout_hit_fm(&L, L.fm.list_x + 1, L.fm.list_y + 1) == FM_HIT_LIST,
+              "fm layout: a click in the browser pane is the browser");
+        CHECK(layout_hit_fm(&L, L.fm.prev_x + 1, L.fm.prev_y + 1) == FM_HIT_PREVIEW,
+              "fm layout: a click in the preview pane is the preview");
+        CHECK(layout_hit_fm(&L, L.fm.list_x + L.fm.list_w + 1, L.fm.list_y + 1) == FM_HIT_NONE,
+              "fm layout: the gap between the two panes belongs to neither");
+        CHECK(layout_hit_fm(&L, L.fm.list_x + 1, L.fm.list_y + L.fm.list_h + 1) == FM_HIT_NONE,
+              "fm layout: the gap between the band and the terminal pane belongs to neither");
+        CHECK(layout_hit_fm(&L, L.fm.list_x + 1, L.pane[0].y + 1) == FM_HIT_NONE &&
+              layout_hit_pane(&L, L.fm.list_x + 1, L.pane[0].y + 1) == 0,
+              "fm layout: below the band is the terminal again, and only the terminal");
+        CHECK(layout_hit_fm(&L, 100, 4) == FM_HIT_NONE,
+              "fm layout: the top margin is not part of the band");
+
+        /* The preview toggled away: the browser owns the whole band. */
+        rq.fm_preview_on = 0;
+        layout_compute(&rq, &L);
+        CHECK(L.fm.on == 1 && L.fm.prev_on == 0 && L.fm.list_w == 920 && L.fm.prev_w == 0,
+              "fm layout: with the preview off the browser takes the whole band");
+        CHECK(layout_hit_fm(&L, 900, 100) == FM_HIT_LIST,
+              "fm layout: and the whole band hit-tests as the browser");
+
+        /* A band bigger than the window can spare: the terminal keeps FM_TERM_MIN_ROWS and the band
+           shrinks to the rest - it never starves the shell. */
+        rq.fm_preview_on = 1;
+        rq.fm_rows = 100000;
+        layout_compute(&rq, &L);
+        CHECK(L.fm.on == 1 && L.fm.list_h == 986 - 8 - FM_TERM_MIN_ROWS * 17 &&
+              L.pane[0].h == FM_TERM_MIN_ROWS * 17,
+              "fm layout: an oversized band shrinks so the terminal keeps its minimum rows");
+
+        /* A window too short for both: the band is dropped, exactly like the tab bar is. */
+        rq.fm_rows = 12;
+        rq.win_h = 120;                       /* grid area 104 px: no room for 3+3 rows and a gap */
+        layout_compute(&rq, &L);
+        CHECK(L.fm.on == 0 && L.fm.list_h == 0,
+              "fm layout: a window too short for band AND terminal drops the band (the terminal wins)");
+        CHECK(L.pane[0].y == 8 && L.pane[0].h == 104 && L.pane[0].rows == 6,
+              "fm layout: and the terminal pane gets the whole grid area back");
+        CHECK(layout_hit_fm(&L, 100, 20) == FM_HIT_NONE,
+              "fm layout: with the band off no point ever hit-tests as the file manager");
+
+        /* The startup round trip with the band on: the window asked for must give back the configured
+           cols x rows for the terminal pane, band and both gaps included. */
+        layout_initial_size(80, 30, 8, 17, 8, 8, BAR_AUTO, 1, 12, &iw, &ih);
+        CHECK(ih == 30 * 17 + 16 + 12 * 17 + 8,
+              "fm layout: the startup window also holds the band rows and their gap");
+        lreq(&rq, LAYOUT_TABS, iw, ih, 8, 17, 8, 8, 1, 0, 4, BAR_AUTO);
+        rq.fm_on = 1; rq.fm_preview_on = 1; rq.fm_rows = 12;
+        layout_compute(&rq, &L);
+        layout_grid_size(&L, &lcols, &lrows);
+        CHECK(lcols == 80 && lrows == 30,
+              "layout: a file-manager startup gets the configured cols x rows back for the terminal pane");
     }
 
     /* ---------- graphics: the kitty image protocol (src/vt.c) ----------

@@ -33,6 +33,11 @@ Kai-Term is currently a working prototype. It builds cleanly, runs a shell, and 
   the ones with output you have not seen. A click switches to a session, a middle click closes it.
 - **Side-by-side view** — The sessions can be drawn next to each other as equal-width panes in the same
   window; one shortcut flips between that and the one-session-per-window view.
+- **File manager** — A browser and a live preview pane can be split into the top of the window, drawn with
+  the same font, colours and cells as the terminal. It shows the directory contents, an image preview
+  (PNG, JPEG, WebP, GIF), syntax-highlighted text, or the type, size, dates, owner and permissions of
+  anything else, and the shell below follows the directory you browse into. One shortcut shows it, another
+  moves the keyboard between the browser and the terminal.
 - **Font zoom** — Increase or decrease the font size without resizing the window.
 - **System clipboard** — Copy and paste use the standard Wayland clipboard, so text copied in Kai-Term
   pastes into other applications and text copied anywhere else pastes into Kai-Term.
@@ -51,6 +56,8 @@ Kai-Term is currently a working prototype. It builds cleanly, runs a shell, and 
 - HarfBuzz
 - libpng
 - zlib
+- libjpeg (the file manager's JPEG previews)
+- libwebp (the file manager's WebP previews)
 - wayland-scanner
 - wayland-protocols
 
@@ -136,6 +143,53 @@ terminal looks — font, font size, columns, rows, scrollback, colours, opacity 
 configuration file only. Any option Kai-Term does not accept is rejected with
 `kai-term: unknown option '<flag>'` followed by the option list above.
 
+### File manager
+
+`Ctrl`+`Shift`+`F` splits the top of the window into a **browser** (left) and a **preview** (right), and
+leaves the ordinary terminal underneath. It is drawn with the same font, colours, borders and cells as the
+terminal, and closing it returns the window to exactly what it was before.
+
+The browser lists the current directory — directories first, then files, case-insensitively — with the
+directory path in its header line and, in its footer, how many entries are shown, whether the listing was
+capped, and any error. Each row shows the name, a `@` for a symlink, and the size for a file. The selected
+row is highlighted across the whole width and keeps the colour of its kind.
+
+The preview pane shows whatever fits the selected entry:
+
+| Selected | Preview |
+|---|---|
+| a directory | its contents (up to 512 entries), plus the entry count |
+| an image | the picture, aspect-preserving and never upscaled — PNG, JPEG, WebP and GIF, recognised by their own magic bytes, not by the file name |
+| a text file | the first 256 KiB, with syntax highlighting for C/C++/headers, Python, shell, JSON, Markdown, Make, INI/TOML, HTML/XML, Rust, JS/TS, Go, CSS and YAML |
+| anything else | its type, size, modification and access times, owner and group, and permission string |
+
+Binary files, files that cannot be read, missing files and dangling symlinks are shown as metadata with a
+line saying why there is no preview — never as garbage and never as an error that stops the browser.
+
+| Key (default) | In the browser |
+|---|---|
+| `Up` / `Down` | move the selection (holding the key walks the list) |
+| `Page_Up` / `Page_Down`, `Home` / `End` | move by a page, to the first / last entry |
+| `Return` | open the selected directory; on a file, type its quoted path at the shell prompt **without** pressing Enter |
+| `BackSpace` | go to the parent directory |
+| `r` | re-read the current directory |
+| `p` | show or hide the preview pane (with it off, the browser is the full width of the band) |
+| `.` | show or hide dotfiles |
+| `Escape` | close the file manager |
+| mouse left click | select the row under the pointer; a click in the terminal pane hands the keyboard back |
+| mouse wheel | over the band it walks the listing; over the terminal it scrolls history as usual |
+
+`Ctrl`+`Shift`+`Up` gives the keyboard to the browser, `Ctrl`+`Shift`+`Down` gives it back to the terminal.
+While the browser has the keyboard the keys above belong to it; the moment the terminal has it those same
+keys go to the shell unchanged, so `Up` is still history recall. A thin border marks which region has the
+keyboard.
+
+By default, browsing into a directory also sends `cd '<that directory>'` to the shell, so the prompt lands
+where you are looking (`fm_follow = 0` turns that off). Kai-Term never runs a file for you: `Return` on a
+file only types its path, and you add the command.
+
+To have the band up from startup, set `file_manager = 1` in the configuration file.
+
 ## Configuration
 
 The default configuration file is:
@@ -178,11 +232,36 @@ Settings use a simple `key = value` format.
 | `key_prev_tab` | `Ctrl+Shift+Left` | Show the previous session |
 | `key_tab_prefix` | `Ctrl+Shift` | Hold these and press `1`–`9` to jump to that session (`none` disables it) |
 | `key_toggle_layout` | `Ctrl+Shift+S` | Switch between the one-session view and the side-by-side view |
+| `file_manager` | `0` | Show the file-manager band from startup instead of only when the shortcut is pressed |
+| `fm_rows` | `12` | Cell rows the band asks for (clamped to 3–64, and shrunk further so the terminal keeps at least 3 rows; if even that does not fit, the band is dropped for that frame) |
+| `fm_preview` | `1` | Show the preview pane next to the browser (`p` toggles it at runtime; off means the browser is full width) |
+| `fm_show_hidden` | `0` | Include dotfiles in the listing from the start (`.` toggles it at runtime) |
+| `fm_follow` | `1` | Browsing into a directory also sends `cd '<path>'` to the shell |
+| `key_file_manager` | `Ctrl+Shift+F` | Show / hide the file manager (`none` unbinds it) |
+| `key_fm_focus` | `Ctrl+Shift+Up` | Give the keyboard to the browser (`none` unbinds it) |
+| `key_fm_release` | `Ctrl+Shift+Down` | Give the keyboard back to the terminal (`none` unbinds it) |
+| `fm_key_up` | `Up` | Move the selection up |
+| `fm_key_down` | `Down` | Move the selection down |
+| `fm_key_pageup` | `Page_Up` | Move up one page |
+| `fm_key_pagedown` | `Page_Down` | Move down one page |
+| `fm_key_home` | `Home` | Select the first entry |
+| `fm_key_end` | `End` | Select the last entry |
+| `fm_key_open` | `Return` | Open a directory / type a file's path |
+| `fm_key_parent` | `BackSpace` | Go to the parent directory |
+| `fm_key_refresh` | `r` | Re-read the current directory |
+| `fm_key_preview` | `p` | Show / hide the preview pane |
+| `fm_key_hidden` | `.` | Show / hide dotfiles |
+| `fm_key_quit` | `Escape` | Close the file manager |
 | `log` | `1` | Log level: 0 = error, 1 = warning, 2 = info, 3 = debug |
 
-Font size, grid dimensions, scrollback limits, opacity, and the key-repeat timings have defined valid
-ranges; out-of-range values are clamped to the nearest valid one. Invalid configuration values should be
-corrected according to the application's diagnostics.
+Font size, grid dimensions, scrollback limits, opacity, the key-repeat timings and the file-manager band
+height have defined valid ranges; out-of-range values are clamped to the nearest valid one. Invalid
+configuration values should be corrected according to the application's diagnostics.
+
+The `fm_key_*` bindings are the one place a key with **no modifier** is allowed. That is safe only because
+those keys are matched while the file manager owns the keyboard — with the file manager closed, or with the
+terminal focused, `Up`, `r` and `Escape` reach the shell exactly as before. Every other binding still
+requires modifiers, and `none` unbinds any of them.
 
 ### Example configuration
 
@@ -212,6 +291,8 @@ opacity = 0.95
 | `Ctrl` + `Shift` + `Right` / `Left` | Show the next / previous session |
 | `Ctrl` + `Shift` + `1`…`9` | Jump to that session |
 | `Ctrl` + `Shift` + `S` | Switch between the one-session view and the side-by-side view |
+| `Ctrl` + `Shift` + `F` | Show / hide the file manager |
+| `Ctrl` + `Shift` + `Up` / `Down` | Give the keyboard to the file manager / back to the terminal |
 
 Dragging with the left mouse button selects text when the running application has not taken control of
 the mouse. Releasing the button keeps the selection visible; `Ctrl`+`Shift`+`C` copies it to the system
@@ -229,7 +310,26 @@ repeats follow at `repeat_rate` per second. Repeating works for everything typed
 `Shift`+`PageUp`/`PageDown`/`Home`/`End` history scrolling. The shortcuts that change the terminal itself
 (`Ctrl`+`+`/`-`/`0` zoom and `Ctrl`+`Shift`+`C`/`V`) never repeat, so a held key cannot run past a font
 size or paste over and over. Releasing the key stops the repeat immediately; setting `repeat_delay = 0`
-disables repeating entirely.
+disables repeating entirely. The file manager's movement keys repeat the same way (holding `Down` walks
+the listing); its one-shot keys — open, parent, refresh, preview, dotfiles, close — never do.
+
+### File-manager keys
+
+These belong to the file manager only while it owns the keyboard, and every one of them is configurable
+(`fm_key_*`). With the file manager closed, or with the terminal focused, the same keys go to the shell
+unchanged.
+
+| Key | Action |
+|---|---|
+| `Up` / `Down` | Move the selection (hold to walk the list) |
+| `Page_Up` / `Page_Down` | Move by one page |
+| `Home` / `End` | First / last entry |
+| `Return` | Open the selected directory; on a file, type its quoted path at the prompt |
+| `BackSpace` | Go to the parent directory |
+| `r` | Re-read the current directory |
+| `p` | Show / hide the preview pane |
+| `.` | Show / hide dotfiles |
+| `Escape` | Close the file manager |
 
 ## Sessions and layouts
 
