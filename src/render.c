@@ -9,7 +9,12 @@
  *   - a glyph quad: a mono glyph (alpha8 atlas, tinted by the cell fg) or a COLOR emoji
  *     (RGBA8 color atlas, premultiplied, not tinted) — see a_glyph in the fragment shader
  * The bar adds one background + one separator + one glyph per character per item, and side-by-side view
- * adds four quads for the focus border. All of it is one draw call.
+ * adds four quads for the focus border. A picture an application sent with the kitty graphics protocol
+ * (see the graphics section of src/vt.c) adds one textured quad of its own.
+ *
+ * A frame is TWO vertex batches plus one draw per visible picture, not one draw call: this renderer never
+ * enables GL blending (see fs_src), so the only way to put a picture over the cell backgrounds but under
+ * the text -- which is how the protocol's own terminal draws it -- is to draw it in between.
  *
  * Hardware instancing (GL_ARB_draw_instanced + GL_ARB_instanced_arrays) is used when the
  * driver advertises both extensions: a static unit-quad VBO supplies the per-vertex corner
@@ -72,6 +77,7 @@ static const char *fs_src =
     "#version 120\n"
     "uniform sampler2D u_atlas;\n"      /* unit 0: alpha8 mono glyph atlas */
     "uniform sampler2D u_catlas;\n"     /* unit 1: RGBA8 color emoji atlas */
+    "uniform sampler2D u_img;\n"        /* unit 2: the RGBA8 texture of one application picture */
     "uniform vec4 u_sel;\n"        /* selection highlight colour */
     "varying vec2 v_tex;\n"
     "varying vec4 v_fg;\n"
@@ -100,9 +106,16 @@ static const char *fs_src =
     "        bg = u_sel;\n"
     "    vec3 bgp = bg.rgb * bg.a;\n"      /* the background behind this fragment, premultiplied */
     /* a_glyph: 0 = background quad, 1 = mono glyph (alpha8, tinted by v_fg), 2 = COLOR emoji
-       glyph. A color texel is already premultiplied RGBA straight out of the emoji font, so it
-       composites as texel + bg*(1-texel.a) and is deliberately NOT tinted by the text colour;
-       v_fg is white (0.5 grey for ATTR_DIM) so dimming still works without a new attribute. */
+       glyph, 3 = an application picture. A color texel is already premultiplied RGBA straight out of
+       the emoji font, so it composites as texel + bg*(1-texel.a) and is deliberately NOT tinted by the
+       text colour; v_fg is white (0.5 grey for ATTR_DIM) so dimming still works without a new
+       attribute. 3 is the same composite against the texture of the picture being drawn -- vt.c
+       premultiplies every decoded pixel, so no GL blending is needed there either. */
+    "    if (v_glyph > 2.5) {\n"
+    "        vec4 c = texture2D(u_img, v_tex);\n"
+    "        gl_FragColor = vec4(c.rgb + bgp * (1.0 - c.a), c.a + bg.a * (1.0 - c.a));\n"
+    "        return;\n"
+    "    }\n"
     "    if (v_glyph > 1.5) {\n"
     "        vec4 c = texture2D(u_catlas, v_tex) * v_fg;\n"
     "        gl_FragColor = vec4(c.rgb + bgp * (1.0 - c.a), c.a + bg.a * (1.0 - c.a));\n"
@@ -185,6 +198,7 @@ static unsigned compile_prog(Render *r)
     r->u_mvp = glGetUniformLocation(p, "u_mvp");
     r->u_atlas = glGetUniformLocation(p, "u_atlas");
     r->u_catlas = glGetUniformLocation(p, "u_catlas");
+    r->u_img = glGetUniformLocation(p, "u_img");
     r->u_sel = glGetUniformLocation(p, "u_sel");
     return p;
 }
@@ -455,6 +469,139 @@ static void set_attribs_instanced(Render *r)
         set_div(i, 1);
 }
 
+/* ---------- application pictures: one GL texture per model image ---------- */
+
+#define IMAGE_TEX_MAX 512      /* textures held at once — more than any screen can show */
+#define IMG_VIEW_MAX  64       /* pictures of one pane considered per frame */
+
+/* The texture holding one image's texels: created on first use, re-uploaded when the model bumped
+   `version` (an animation frame replaces the pixels). Keyed by KImage.serial, which the model never
+   reuses, so a recycled KImage pointer can never make this cache hand back a stale texture. */
+static unsigned img_tex(Render *r, KImage *im, int frame)
+{
+    ImgTex *sl = NULL;
+    for (int i = 0; i < r->nimgtex; i++)
+        if (r->imgtex[i].serial == im->serial) {
+            sl = &r->imgtex[i];
+            break;
+        }
+    if (!sl) {
+        if (r->nimgtex >= r->imgtex_cap) {
+            int cap = r->imgtex_cap ? r->imgtex_cap * 2 : 16;
+            if (cap > IMAGE_TEX_MAX)
+                cap = IMAGE_TEX_MAX;
+            if (r->nimgtex >= cap)
+                return 0;
+            ImgTex *nt = realloc(r->imgtex, (size_t)cap * sizeof *nt);
+            if (!nt)
+                return 0;
+            r->imgtex = nt;
+            r->imgtex_cap = cap;
+        }
+        sl = &r->imgtex[r->nimgtex++];
+        memset(sl, 0, sizeof *sl);
+        sl->serial = im->serial;
+        GLuint t = 0;
+        glGenTextures(1, &t);
+        sl->tex = t;
+    }
+    sl->seen = frame;
+    if (sl->version != im->version || sl->w != im->w || sl->h != im->h) {
+        glBindTexture(GL_TEXTURE_2D, sl->tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, im->w, im->h, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, im->rgba);
+        GLenum err = glGetError();
+        if (err != GL_NO_ERROR)
+            klog(L_WARN, "image glTexImage2D failed: 0x%x (%dx%d)", err, im->w, im->h);
+        /* LINEAR, not NEAREST: a picture is scaled from its own pixel grid to the cell grid, and
+           nearest turns that into a mosaic. No mipmaps, so a non-power-of-two size is legal on a
+           GL 2.1 context with CLAMP_TO_EDGE. */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        sl->version = im->version;
+        sl->w = im->w;
+        sl->h = im->h;
+    }
+    return sl->tex;
+}
+
+/* Drop the textures of pictures that were not on screen this frame, so the GPU never holds more than
+   what the user can see and an image the model evicted loses its texture in the same frame. */
+static void img_tex_sweep(Render *r, int frame)
+{
+    int keep = 0;
+    for (int i = 0; i < r->nimgtex; i++) {
+        if (r->imgtex[i].seen == frame) {
+            if (keep != i)
+                r->imgtex[keep] = r->imgtex[i];
+            keep++;
+        } else if (r->imgtex[i].tex) {
+            GLuint t = r->imgtex[i].tex;
+            glDeleteTextures(1, &t);
+        }
+    }
+    r->nimgtex = keep;
+}
+
+/* Upload one batch of instance records and draw it. Reusing r->vbo per batch is safe: glBufferData
+   copies the staging data into driver storage before the next batch overwrites it. */
+static void draw_quads(Render *r, const float *inst, int nquads)
+{
+    if (nquads <= 0)
+        return;
+    if (r->inst_ok) {
+        fn_draw_arrays_instanced draw = (fn_draw_arrays_instanced)r->draw_inst;
+        glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
+        glBufferData(GL_ARRAY_BUFFER, (size_t)nquads * FLOATS_PER_INST * sizeof(float),
+                     inst, GL_STREAM_DRAW);
+        set_attribs_instanced(r);
+        draw(GL_TRIANGLES, 0, 6, nquads);
+    } else {
+        float *edata = ensure_edata(r, nquads);
+        expand_instances(inst, nquads, edata);
+        glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
+        glBufferData(GL_ARRAY_BUFFER, (size_t)nquads * 6 * FLOATS_PER_VERT * sizeof(float),
+                     edata, GL_STREAM_DRAW);
+        set_attribs_interleaved();
+        glDrawArrays(GL_TRIANGLES, 0, nquads * 6);
+    }
+}
+
+/* The GL state every batch shares. Called before each batch: an atlas texture can be created between
+   batches (the glyph lookups run while the quads are emitted) and the picture sampler must point at a
+   bound texture when nothing is on screen. */
+static void setup_draw_state(Render *r, const Font *f, const float *selc)
+{
+    glViewport(0, 0, r->vw, r->vh);
+    glUseProgram(r->prog);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, f->atlas_tex);
+    glUniform1i(r->u_atlas, 0);
+    if (f->catlas_tex) {
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, f->catlas_tex);
+        glUniform1i(r->u_catlas, 1);
+    } else {
+        /* no color glyph has ever been shaped: point the second sampler at the mono atlas so no
+           texture unit is left unbound (no quad in this frame uses a_glyph == 2 anyway) */
+        glUniform1i(r->u_catlas, 0);
+    }
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, f->atlas_tex);
+    glUniform1i(r->u_img, 2);
+    glActiveTexture(GL_TEXTURE0);
+    glUniform4f(r->u_sel, selc[0], selc[1], selc[2], selc[3]);
+    float mvp[16] = {
+        2.0f / r->vw, 0, 0, 0,
+        0, 2.0f / r->vh, 0, 0,
+        0, 0, -1, 0,
+        -1, -1, 0, 1,
+    };
+    glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, mvp);
+}
+
 /* ---------- the frame: the tab bar plus one grid per pane ---------- */
 
 /* Blend two ARGB colours, k100 = percent of b (0..100). Only the CHROME uses this: the cells keep their
@@ -539,6 +686,83 @@ static Term *pane_term(Term *const *terms, int tab)
     return terms[tab];
 }
 
+/* Draw every picture of one pane that is at least partly inside it. The model places pictures in CELLS
+   (viewport row/column + span) while the protocol sizes them in PIXELS, so the rect is built in window
+   px and then clipped to the pane: without the clip a picture whose anchor row scrolled above the pane
+   top would be painted over the tab bar or into the neighbouring pane, and the texture coordinates of
+   the part that IS visible would be wrong. */
+static int draw_images(Render *r, Term *t, const PaneGeom *pg, const PaneDraw *pd,
+                       float cw, float ch, int frame)
+{
+    ImgView view[IMG_VIEW_MAX];
+    int n = term_visible_images(t, view, IMG_VIEW_MAX);
+    if (n <= 0 || pd->nrows <= 0 || pd->ncols <= 0)
+        return 0;
+
+    const float white[4] = { 1, 1, 1, 1 };
+    int drawn = 0;
+
+    for (int i = 0; i < n; i++) {
+        KImage *im = view[i].img;
+        if (!im->rgba || im->w <= 0 || im->h <= 0)
+            continue;
+        unsigned tex = img_tex(r, im, frame);
+        if (!tex)
+            continue;
+
+        /* An explicit c=/r= scales the picture into exactly that cell area (vt.c derives the missing
+           dimension from the picture's own aspect ratio); with neither, the protocol draws it at its
+           native pixel size and the ceil()ed span only says how many cells it covers. */
+        float w_px, h_px;
+        if (im->cols > 0 || im->rows > 0) {
+            w_px = (float)view[i].ccols * cw;
+            h_px = (float)view[i].crows * ch;
+        } else {
+            w_px = (float)im->w;
+            h_px = (float)im->h;
+        }
+        if (w_px <= 0.0f || h_px <= 0.0f)
+            continue;
+
+        float x0 = pd->gx + (float)view[i].ccol * cw + (float)im->px;
+        float y0 = (float)pg->y + (float)view[i].crow * ch + (float)im->py;
+        float cl = x0, ct = y0, cr = x0 + w_px, cb = y0 + h_px;
+        if (cl < (float)pg->x) cl = (float)pg->x;
+        if (ct < (float)pg->y) ct = (float)pg->y;
+        if (cr > (float)(pg->x + pg->w)) cr = (float)(pg->x + pg->w);
+        if (cb > (float)(pg->y + pg->h)) cb = (float)(pg->y + pg->h);
+        if (cr <= cl || cb <= ct)
+            continue;
+
+        /* the visible sub-rectangle of the texture: v grows down through the image rows, exactly the
+           atlas convention emit_quad expects (it Y-flips for GL's bottom-up y) */
+        float u0 = (cl - x0) / w_px, u1 = (cr - x0) / w_px;
+        float v0 = (ct - y0) / h_px, v1 = (cb - y0) / h_px;
+
+        /* No GL blending, so the quad composites against its OWN copy of the background behind it: the
+           colour of the cell its top-left visible corner sits in, which is what batch A already painted
+           there. A picture spanning cells with different backgrounds blends against only one of them —
+           the price of never enabling blending (see fs_src). */
+        const Cell *anchor = &grid_vprow(pd->g, iclamp_(view[i].crow, 0, pd->nrows - 1))
+                                [iclamp_(view[i].ccol, 0, pd->ncols - 1)];
+        uint32_t cellbg = (anchor->attr & ATTR_INVERSE) ? anchor->fg : anchor->bg;
+        float bg[4];
+        col2f(cellbg, bg);
+        bg[3] *= r->opacity;
+
+        float rec[FLOATS_PER_INST];
+        float *ip = rec;
+        emit_quad(&ip, cl, (float)r->vh - cb, cr - cl, cb - ct,
+                  u0, v0, u1, v1, white, bg, 3.0f, 0.0f, 0.0f);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        draw_quads(r, rec, 1);
+        drawn++;
+    }
+    glActiveTexture(GL_TEXTURE0);
+    return drawn;
+}
+
 int render_draw(Render *r, Font *f, const Layout *lay, Term *const *terms)
 {
     glClear(GL_COLOR_BUFFER_BIT);
@@ -583,7 +807,11 @@ int render_draw(Render *r, Font *f, const Layout *lay, Term *const *terms)
        cell — in side-by-side mode that also keeps a pane's glyph from being clipped by its neighbour's
        background. The chrome is appended at the end of the pass it belongs to, so it sits on top of the
        grid it borders. There is no GL blending: within one draw call the later quad simply wins, which is
-       what the existing pass order already relies on. */
+       Passes 1 and 2+3 are TWO draw calls with the pictures drawn between them, because a picture has
+       to be over the cell background but under the text — that is how the protocol's own terminal draws
+       it, and with no GL blending the draw order is the only thing that can achieve it. Both batches
+       live in ONE staging buffer: batch A is already in driver storage when batch B is built, so the
+       split is just two ranges of the same records. */
 
     /* Pass 1: cell backgrounds (always, so every pane is fully painted). An unselected block cursor
        paints its block here; a selected cursor cell keeps its own background (the band in pass 2 marks
@@ -648,6 +876,11 @@ int render_draw(Render *r, Font *f, const Layout *lay, Term *const *terms)
             }
         }
     }
+
+    /* Everything emitted so far is batch A: cell backgrounds, the block cursor, the bar item
+       backgrounds and separators. The pictures go on top of exactly these, and everything after this
+       point (bands, glyphs, labels, border) goes on top of the pictures. */
+    int nq_bg = nquads;
 
     /* Pass 2: selection overlay bands (over the background, under the glyphs), per pane. Drawn for every
        covered cell that holds something, including the cursor cell, so the highlight always matches what
@@ -909,50 +1142,46 @@ int render_draw(Render *r, Font *f, const Layout *lay, Term *const *terms)
     glViewport(0, 0, r->vw, r->vh);
     /* Clear every frame: the padding margin, the gaps between panes and the whole-cell remainders are
        outside every quad, so nothing else writes them, and after a resize the new back buffer has no
-       defined contents. */
+       defined contents. Cleared ONCE per frame — clearing again between the batches would erase the
+       batch already drawn. */
     set_clear_color(r);
     glClear(GL_COLOR_BUFFER_BIT);
-    glUseProgram(r->prog);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, f->atlas_tex);
-    glUniform1i(r->u_atlas, 0);
-    if (f->catlas_tex) {
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, f->catlas_tex);
-        glUniform1i(r->u_catlas, 1);
-    } else {
-        /* no color glyph has ever been shaped: point the second sampler at the mono atlas so no
-           texture unit is left unbound (no quad in this frame uses a_glyph == 2 anyway) */
-        glUniform1i(r->u_catlas, 0);
-    }
-    glActiveTexture(GL_TEXTURE0);
-    glUniform4f(r->u_sel, selc[0], selc[1], selc[2], selc[3]);
-    float mvp[16] = {
-        2.0f / r->vw, 0, 0, 0,
-        0, 2.0f / r->vh, 0, 0,
-        0, 0, -1, 0,
-        -1, -1, 0, 1,
-    };
-    glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, mvp);
 
     glBindVertexArray(r->vao);
+    setup_draw_state(r, f, selc);
 
-    if (r->inst_ok) {
-        fn_draw_arrays_instanced draw = (fn_draw_arrays_instanced)r->draw_inst;
-        glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
-        glBufferData(GL_ARRAY_BUFFER, (size_t)nquads * FLOATS_PER_INST * sizeof(float),
-                     vdata, GL_STREAM_DRAW);
-        set_attribs_instanced(r);
-        draw(GL_TRIANGLES, 0, 6, nquads);
-    } else {
-        float *edata = ensure_edata(r, maxq);
-        expand_instances(vdata, nquads, edata);
-        glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
-        glBufferData(GL_ARRAY_BUFFER, (size_t)nquads * 6 * FLOATS_PER_VERT * sizeof(float),
-                     edata, GL_STREAM_DRAW);
-        set_attribs_interleaved();
-        glDrawArrays(GL_TRIANGLES, 0, nquads * 6);
+    /* batch A: backgrounds */
+    draw_quads(r, vdata, nq_bg);
+
+    /* the pictures, each in its own draw call because each has its own texture */
+    int frame = ++r->img_frame;
+    int nimg = 0;
+    for (int p = 0; p < lay->npane; p++) {
+        Term *t = pane_term(terms, lay->pane[p].tab);
+        if (!t)
+            continue;
+        PaneDraw pd;
+        pane_prepare(r, t, &lay->pane[p], f, &pd);
+        nimg += draw_images(r, t, &lay->pane[p], &pd, cw, ch, frame);
     }
+
+    /* One line per CHANGE in how many pictures are on screen — the client-side evidence for any
+       "the picture is missing" report, and proof that the renderer reached the image path at all
+       (a GLSL or texture failure shows up as the matching warning above it). Not one line a frame. */
+    static int last_nimg = -1;
+    if (last_nimg != nimg) {
+        last_nimg = nimg;
+        klog(L_DEBUG, "graphics: %d image(s) drawn, %d texture(s) held", nimg, r->nimgtex);
+    }
+
+    /* batch B: selection bands, glyphs, bar labels, focus border — on top of the pictures, so text
+       stays readable over a picture the way the protocol expects. */
+    setup_draw_state(r, f, selc);
+    draw_quads(r, vdata + (size_t)nq_bg * FLOATS_PER_INST, nquads - nq_bg);
+
+    /* textures of pictures that were not on screen this frame go now: after the last draw that could
+       have used them, before the buffer is presented */
+    img_tex_sweep(r, frame);
 
     /* Returns 1 when the buffer really was attached (eglSwapBuffers succeeded) and 0 otherwise.
        main.c needs that: a wl_surface_frame callback may only be armed together with a commit that
@@ -979,6 +1208,15 @@ void render_resize(Render *r, int w, int h)
 
 void render_destroy(Render *r)
 {
+    if (r->edpy != EGL_NO_DISPLAY) {
+        /* while the context is still current — glDeleteTextures is a no-op without one */
+        for (int i = 0; i < r->nimgtex; i++)
+            if (r->imgtex[i].tex) {
+                GLuint t = r->imgtex[i].tex;
+                glDeleteTextures(1, &t);
+            }
+    }
+    free(r->imgtex);
     if (r->edpy != EGL_NO_DISPLAY) {
         eglMakeCurrent((EGLDisplay)r->edpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         if (r->ectx != EGL_NO_CONTEXT)

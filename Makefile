@@ -3,7 +3,9 @@
 # Generated Wayland bindings live in build/generated/ (created by wayland-scanner).
 
 CC      ?= cc
-PKG     := wayland-client wayland-cursor wayland-egl egl gl xkbcommon freetype2 fontconfig harfbuzz
+# libpng + zlib are for the image protocol (src/vt.c decodes the PNG payloads applications send);
+# see the graphics section there and README "Requirements".
+PKG     := wayland-client wayland-cursor wayland-egl egl gl xkbcommon freetype2 fontconfig harfbuzz libpng zlib
 # The whole tree (src/ and tests/) is warning-free under this set. -Wcast-qual is deliberately NOT
 # enabled: the wayland-scanner-generated xdg-shell bindings in build/generated/ trigger it, and that
 # file is not ours to fix.

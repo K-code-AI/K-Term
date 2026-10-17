@@ -256,6 +256,17 @@ static void layout_apply(void)
 
     for (int i = 0; i < mux_count(&mux); i++) {
         Tab *tb = &mux.tab[i];
+        /* The image protocol sizes pictures in PIXELS while the grid is in cells, and an application
+           learns the cell size from the PTY's winsize (measured with timg 1.6.3: it only selects its
+           kitty graphics mode when the PTY reports a non-zero pixel geometry, and it scales with it).
+           This is the one place where the font metrics and every session are in scope together, and it
+           runs on zoom too, where the cell changes without cols x rows changing. */
+        term_set_cell_px(&tb->term, font.cell_w, font.cell_h);
+        pty_set_cells(&tb->pty, font.cell_w, font.cell_h);
+    }
+
+    for (int i = 0; i < mux_count(&mux); i++) {
+        Tab *tb = &mux.tab[i];
         if (cols == tb->term.g.cols && rows == tb->term.g.rows)
             continue;
         term_resize(&tb->term, rows, cols);
@@ -498,6 +509,14 @@ static int tab_for_child(pid_t pid)
    startup) and every later one (key_new_tab). */
 static int tab_spawn(Tab *tb)
 {
+    /* The cell size goes into the Pty BEFORE the spawn. pty_spawn's first TIOCSWINSZ is the geometry
+       the child sees when it starts, and a tool that asks for the pixel geometry immediately
+       (`kai-term -e 'timg foo.png'`) would otherwise fall back to text blocks because that first
+       winsize still has ws_xpixel == 0 — layout_apply() only pushes the cell size once the first
+       frame is drawn, which can be later than the child's first query. pty_set_cells() is not usable
+       here: it re-issues an ioctl and there is no master fd yet. */
+    tb->pty.cell_w = font.cell_w > 0 ? font.cell_w : 0;
+    tb->pty.cell_h = font.cell_h > 0 ? font.cell_h : 0;
     if (pty_spawn(&tb->pty, g_cmd, tb->term.g.rows, tb->term.g.cols, g_wdir) < 0)
         return -1;
     struct epoll_event ev = { .events = EPOLLIN, .data.fd = tb->pty.mfd };

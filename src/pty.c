@@ -103,6 +103,15 @@ void pty_setsize(Pty *p, int rows, int cols)
         .ws_row = (unsigned short)rows,
         .ws_col = (unsigned short)cols,
     };
+    /* The cell size in px, when it is known. Applications that draw images need it: timg 1.6.3
+       only auto-selects its kitty graphics mode when the PTY reports a non-zero pixel geometry
+       (measured: with ws_xpixel/ws_ypixel == 0 it prints "cell-pixels: -1x-2" and falls back to
+       quarter blocks), and it scales the image with it, so reporting nothing is what makes an
+       image come out at the wrong aspect. */
+    if (p->cell_w > 0 && p->cell_h > 0) {
+        ws.ws_xpixel = (unsigned short)(cols * p->cell_w);
+        ws.ws_ypixel = (unsigned short)(rows * p->cell_h);
+    }
     if (ioctl(p->mfd, TIOCSWINSZ, &ws) == 0 &&
         (p->rows != rows || p->cols != cols)) {
         if (p->child > 0)
@@ -110,6 +119,22 @@ void pty_setsize(Pty *p, int rows, int cols)
     }
     p->rows = rows;
     p->cols = cols;
+}
+
+void pty_set_cells(Pty *p, int cell_w, int cell_h)
+{
+    if (p->mfd < 0)
+        return;
+    if (cell_w < 0) cell_w = 0;
+    if (cell_h < 0) cell_h = 0;
+    if (p->cell_w == cell_w && p->cell_h == cell_h)
+        return;
+    p->cell_w = cell_w;
+    p->cell_h = cell_h;
+    /* Re-issue the geometry. Zooming changes the cell without changing cols x rows, and an
+       application that already read the winsize must see the new pixel numbers. No SIGWINCH:
+       the character size the application draws in did not change, only the reported px. */
+    pty_setsize(p, p->rows, p->cols);
 }
 
 void pty_write(Pty *p, const void *buf, size_t len)

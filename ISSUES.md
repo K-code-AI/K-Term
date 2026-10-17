@@ -6,10 +6,14 @@ The rules those bugs produced are in AGENT.md "Architecture & Invariants" — re
 
 ## Open
 
-**None.** Verified 2026-10-17 from a clean tree: `make` exit 0 with 0 warnings; `make test` -> 501 checks
-0 failures + `MODEL OK (0 problems)` + `CLI: 86 checks, 0 failures, 0 skipped`; `make asan` -> 501/0 +
+**None.** Verified 2026-10-17 from a clean tree: `make` exit 0 with 0 warnings; `make test` -> 553 checks
+0 failures + `MODEL OK (0 problems)` + `CLI: 86 checks, 0 failures, 0 skipped`; `make asan` -> 553/0 +
 MODEL OK with no AddressSanitizer/UBSan/LeakSanitizer report; no `TODO`/`FIXME`/`XXX` anywhere in
 `src/`, `include/`, `tests/`.
+
+Not a bug but not confirmed by eye either: the image protocol is tested at the model level (parser,
+chunking, decode, placement, lifetime), while the GL drawing of a picture in a real window has not
+been looked at by a human yet. The check is `timg -p k <file.png>` — see README "Images".
 
 To file a problem: symptom, exact reproduction, and what `./bin/kai-term -d` logs. Not reproducible ->
 not filed; it is not a bug until it reproduces.
@@ -75,6 +79,43 @@ Not bugs — current behaviour, each re-checked against the source 2026-10-17. D
   toggle, open/close) resizes EVERY session to the same cols x rows: every shell gets SIGWINCH and every
   session's scrollback re-wraps. That is what makes switching to a hidden session free, and why a toggle
   touches sessions you are not looking at.
+
+**Graphics / images**
+
+- **Only the kitty graphics protocol is decoded.** sixel and the iTerm2 protocol are not: a DCS string
+  (what sixel arrives in) is discarded without a trace. The DA1 answer deliberately omits the graphics
+  capability bits (4, 16, 18) so an application does not pick a protocol Kai-Term cannot receive —
+  measured with timg 1.6.3: with `;4` in that answer it sends sixel and the picture disappears
+  entirely, without it it falls back to drawing with block characters.
+- **`timg` needs `-p k` here.** timg 1.6.3 auto-detects graphics only when `TERM` is `xterm-kitty` or
+  `xterm-ghostty` (a list hardcoded in its binary — `TERM_PROGRAM` changes nothing) and the PTY reports
+  a pixel geometry. Kai-Term reports the geometry (`ws_xpixel`/`ws_ypixel`, `CSI 14 t`, `CSI 16 t`) but
+  sets `TERM=xterm-256color`, so auto-detect lands on block characters.
+- **Parts of the protocol are not implemented**: cropping (`w=`, `h=`, `X=`, `Y=`), placement tweaks
+  (`o=`, `e=`, `v=`), file-based transmission (`t=f`/`t=v`, which would need a file-read permission
+  model), and the actions beyond transmit/place/delete — animation (`a=a`, `a=i`), cursor-only display
+  (`a=C`) and the query (`a=q`). An unimplemented action logs `graphics: action a=X ignored` at debug
+  level instead of drawing something wrong.
+- **Hard caps, so a picture storm cannot exhaust the machine.** One session keeps at most 256 images /
+  64 MiB of decoded pixels (oldest first), accepts at most 4096 px per side and 16 Mpx per image,
+  buffers at most 32 MiB of APC payload per sequence (more is discarded with a warning) and inflates
+  at most 64 MiB. The renderer considers at most 64 pictures per pane per frame and keeps a GL texture
+  only for what is on screen (at most 512).
+- **A picture composites against ONE cell background** — the one its top-left visible corner sits in —
+  because the renderer never enables GL blending. A picture lying over cells with different
+  backgrounds blends against only one of them.
+- **A picture lives exactly as long as the text rows it is anchored to.** Scrolling up into history
+  brings it back while those rows are retained; when they leave the grid (scrollback eviction, `clear`
+  / `CSI 3 J`) the picture is freed with them.
+- **The raw pixel formats (`f=24`/`f=32`) have never been exercised by a real client.** The protocol is
+  ambiguous about what `s=` counts (byte size or column count); Kai-Term accepts whichever reading the
+  payload length fits. timg only ever sends PNG, so nothing on this box can settle it.
+- **Animation is only as good as the client's placement.** Re-transmitting to an existing id replaces
+  that picture (measured: `timg -V` alternates two ids across four frames) rather than stacking a new
+  one, but timg also moves the cursor for every frame, so the frames step down the screen instead of
+  animating in one place.
+- **A picture belongs to the screen it was placed on.** One placed on the alternate screen is drawn
+  only while the alternate screen is active, and one from the main screen only while it is not.
 
 **Rendering / input**
 

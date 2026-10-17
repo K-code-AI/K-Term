@@ -80,11 +80,83 @@ typedef struct {
     uint8_t  nextra;
 } Cell;
 
+/* ---------- graphics: the kitty image protocol (src/vt.c) ----------
+   An application (timg -p k, kitty icat, chafa) sends an image as one or more APC
+   sequences:  ESC _ G <key>=<value>;...;<key>=<value> : <base64> ESC \
+   timg's actual emission, captured from timg 1.6.3 (see AGENT.md s68):
+       ESC_Ga=T,i=<id>,q=2,f=100,m=1;<4096 base64 chars>ESC\   (first chunk)
+       ESC_Gq=2,m=0;<rest>ESC\                                (continuation: no a=, no i=)
+   so m is the "more chunks follow" flag and f=100 means the payload is a PNG. */
+
+/* One image the application transmitted. The PIXELS live in the model (vt.c) so the grid
+   lifetime rules and the unit tests own them; render.c keeps a GL texture per image keyed by
+   `serial` and re-uploads when `version` changes (an animation frame replaces the pixels). */
+typedef struct KImage {
+    int      serial;      /* unique within the Term, never reused: the renderer's texture key */
+    int      app_id;      /* the i= the application used (0 = none) */
+    int      w, h;        /* decoded pixel size */
+    uint8_t *rgba;        /* w*h*4, PREMULTIPLIED: the shader composites c + bg*(1-c.a), the same
+                             rule the color-emoji atlas follows, so no GL blending is needed */
+    /* The image is anchored to an ABSOLUTE grid row (Grid.row_base space), not to a viewport row:
+       a viewport row is invalidated by every scroll, while the absolute row survives rotation,
+       eviction and reflow, so the image scrolls with the text it was printed next to and comes
+       back when the user scrolls up into history. */
+    int64_t  doc_row;
+    int      col;         /* grid column of its left edge */
+    int      px, py;      /* x=/y= pixel offset inside the anchor cell */
+    int      cols, rows;  /* explicit cell span from c=/r= (0 = derive from px and cell size) */
+    int      shown;       /* 0 = transmitted with a=t but never placed -> never drawn */
+    int      z;           /* z-index, smaller drawn first (kitty default 0) */
+    int      alt;         /* 1 = belongs to the alternate screen (drawn only while it is active) */
+    int      version;     /* bumped when the pixels are replaced */
+    struct KImage *next;
+} KImage;
+
+/* A renderer-side GL texture for one model image (render.c owns it). `seen` is stamped with the
+   frame number, so an entry no image claimed this frame is deleted after the frame. */
+typedef struct {
+    int      serial;
+    unsigned tex;
+    int      w, h, version;
+    int      seen;
+} ImgTex;
+
+/* Where one image sits in the CURRENT viewport, as computed by term_visible_images().
+   crow may be negative (the image's top has scrolled above the viewport) and the span may run
+   past the bottom: render.c clips the quad, so it needs the unclipped rect in cell units. */
+typedef struct {
+    KImage *img;
+    int crow, ccol;    /* viewport row/column of the image's top-left cell */
+    int crows, ccols;  /* the span to draw */
+} ImgView;
+
+/* A chunked image transmission in progress: the control block of the FIRST chunk plus the
+   bytes collected so far. Continuation chunks carry only m=, so they inherit everything else. */
+typedef struct KittyTx {
+    int      active;      /* a transmission is in progress */
+    int      more;        /* m=1: more chunks follow */
+    uint8_t *buf; size_t len, cap;
+    int      act;         /* a= : 't','T','f','c','d','q' (0 = continuation chunk) */
+    int      fmt;         /* f= : 24 RGB, 32 RGBA, 48/64/100 PNG */
+    int      id;          /* i= */
+    int      pid;         /* u= placement id */
+    int      use_last;    /* U=1: reuse the most recent image id (timg's grid mode) */
+    int      pw, ph;      /* s= / r= pixel size, for raw formats (r= means height there) */
+    int      r_raw;       /* r= as received: the key means height for the raw formats and rows for
+                             the self-describing ones, and f= may come after it, so the choice is
+                             made after the whole control block has been read */
+    int      cols, rows;  /* c= / r= cell span, for plot actions (r= means rows there) */
+    int      xoff, yoff;  /* x= / y= cell offsets */
+    int      z;           /* z= */
+    int      q;           /* q= : 1 = answer OK, 2 = answer only on failure */
+    int      del;         /* a=d scope: 'A' all, 'I' by id, 'R' at/below cursor, 'C' at cursor */
+} KittyTx;
+
 /* ---------- VT parser ---------- */
 struct Term;   /* forward */
 
 enum PState {
-    PS_GROUND, PS_ESC, PS_CSI, PS_OSC, PS_UTF8, PS_IGNORE
+    PS_GROUND, PS_ESC, PS_CSI, PS_OSC, PS_UTF8, PS_IGNORE, PS_APC, PS_DCS
 };
 
 typedef struct Parser {
@@ -97,6 +169,13 @@ typedef struct Parser {
     int utf8_need, utf8_cp;
     char osc[512];
     int osc_len;
+    /* APC payload (the kitty graphics sequences). Growable: one chunk is a few KB but a
+       different application may put a whole image in one sequence. apc_drop is set when the
+       cap is reached, so a garbage stream cannot exhaust memory. */
+    char  *apc; size_t apc_len, apc_cap;
+    int    apc_drop;
+    int    apc_kind;       /* the byte after ESC _: 'G' = graphics, anything else is ignored */
+    KittyTx tx;
 } Parser;
 
 /* ---------- grid & terminal ---------- */
@@ -121,6 +200,14 @@ typedef struct Grid {
        (reflow, see grid_resize). It rotates together with row[] (rot_left/rot_right) and is cleared
        whenever a slot is blanked or its line is erased. */
     uint8_t *wrap;
+    /* Absolute (document) row number of slot 0. Slots hold a contiguous window of document
+       rows, oldest at slot 0, so slot j == document row row_base + j, and document row A sits
+       at viewport row A - row_base - scroll_off. row_base only moves when a row is EVICTED at
+       the top (a left rotation of the used region) or when the window slides over its own
+       scrollback (erase_scrollback), which is exactly when the oldest rows stop existing. Images
+       are anchored by document row (see KImage), which is what lets them survive scrolling,
+       eviction and reflow without any per-row bookkeeping. */
+    int64_t row_base;
     /* Set to GRID_VALID between grid_init and grid_destroy. term_init frees the grid it is rebuilding
        (the RIS leak fix), so it must be able to tell "there is an old grid here to free" from "this
        Term was never initialized". A plain 0/1 flag is NOT enough: on a stack Term the garbage in
@@ -160,6 +247,17 @@ typedef struct Term {
     int sel_bx, sel_by;    /* current cell (extends from the anchor) */
     int sel_af, sel_bf;    /* sub-cell horizontal offset 0..1000 within anchor/current */
     char title[256];
+    /* Images transmitted by applications (see KImage). A singly-linked list kept oldest first:
+       the byte budget evicts from the front, which is also the order the user scrolls past. */
+    KImage *images;
+    long long image_bytes;      /* decoded bytes held by this session */
+    int      image_serial;      /* next unique serial */
+    int      image_last_id;     /* i= of the most recent image (a U=1 chunk refers to it) */
+    /* Current cell size in px. The image protocol sizes images in PIXELS while the grid is in
+       CELLS, and only main.c knows the font metrics, so it pushes the cell size here (and to the
+       Pty, which reports it to the PTY in winsize). 0 = unknown: images then fall back to their
+       own pixel size as a cell count. */
+    int      cell_w, cell_h;
     Parser ps;             /* parser state lives with the terminal */
     /* Grapheme-cluster assembly state: the anchor cell of the emoji cluster currently being
        built, so a ZWJ / variation selector / skin-tone modifier that follows joins that cell
@@ -365,10 +463,19 @@ typedef struct Pty {
     int mfd;
     pid_t child;
     int rows, cols;
+    /* Cell size in px, reported to the child in winsize.ws_xpixel/ws_ypixel. Applications that
+       draw images (timg, chafa, kitty icat) need it to turn a pixel-sized image into a cell span:
+       measured with timg 1.6.3, it auto-selects the kitty graphics protocol ONLY when the PTY
+       reports a non-zero pixel geometry, and without it the image is scaled to the wrong aspect.
+       0 = not reported (the behaviour before image support). */
+    int cell_w, cell_h;
 } Pty;
 
 int  pty_spawn(Pty *p, const char *cmd, int rows, int cols, const char *dir);
 void pty_setsize(Pty *p, int rows, int cols);
+/* Record the cell size and re-issue TIOCSWINSZ. Zooming changes the cell without changing cols x
+   rows, and an application that already asked for the geometry must be told the new numbers. */
+void pty_set_cells(Pty *p, int cell_w, int cell_h);
 void pty_write(Pty *p, const void *buf, size_t len);
 
 /* ---------- multiplexing: several terminal sessions in one window (src/mux.c) ---------- */
@@ -597,7 +704,15 @@ typedef struct Render {
     /* NOTE: there is no grid origin here any more. Since the tab bar / side-by-side layout the frame is
        a list of rectangles (Layout in kai-term.h), each with its own origin, so main.c passes them per
        frame instead of setting one global offset. */
-    int u_mvp, u_atlas, u_catlas, u_sel;
+    int u_mvp, u_atlas, u_catlas, u_img, u_sel;
+    /* One GL texture per image the model currently shows (see KImage). Keyed by KImage.serial,
+       which is unique per session and never reused, so a recycled pointer can never make the
+       renderer reuse a stale texture. Entries for images that are not on screen are dropped, so
+       the GPU never holds more than what is visible. */
+    ImgTex *imgtex;
+    int nimgtex, imgtex_cap;
+    int img_frame;               /* bumped once per frame; ImgTex.seen == img_frame means "used this
+                                    frame", which is how textures of pictures that left the screen go */
     void *set_div;               /* glVertexAttribDivisorARB or NULL */
     void *draw_inst;             /* glDrawArraysInstancedARB or NULL */
     int inst_ok;                 /* 1 when both ARB instancing extensions are available */
@@ -612,9 +727,20 @@ typedef struct Render {
     void *nwin;                  /* EGLNativeWindowType (wl_egl_window) */
 } Render;
 
+/* ---------- image model helpers (src/vt.c) ---------- */
+void term_set_cell_px(Term *t, int w, int h);
+/* Fill out[] with the images of this session that are at least partly inside the viewport,
+   sorted by z then serial (the order they must be drawn in). Returns the count. Pure grid math,
+   so tests/test_vt.c can pin it without a display. */
+int  term_visible_images(Term *t, ImgView *out, int cap);
+int  term_image_count(const Term *t);
+
+/* ---------- renderer (EGL + GL) ---------- */
 int  render_init(Render *r, void *wl_display, void *egl_window, int w, int h, float opacity,
                  uint32_t bg, uint32_t fg);
-/* Draw one frame: the tab bar (if the layout says so) plus every pane's grid, in one draw call.
+/* Draw one frame: the tab bar (if the layout says so) plus every pane's grid. Two vertex batches
+   (backgrounds, then bands + glyphs + chrome) with one draw call per application picture between them
+   — see the header comment of src/render.c for why the frame cannot be a single call.
    `lay` comes from layout_compute() and carries every rectangle; `terms` is indexed by TAB index, so the
    grid of pane p is terms[lay->pane[p].tab] (NULL draws an empty pane). Returns 1 when a new buffer was
    attached, 0 when the swap failed. */

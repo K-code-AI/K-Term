@@ -12,6 +12,10 @@ Kai-Term is currently a working prototype. It builds cleanly, runs a shell, and 
   brings the text back. Scrollback is re-wrapped too; narrowing far enough drops the oldest lines.
 - **GPU rendering** — OpenGL rendering for fast text and graphics.
 - **Unicode and color emoji** — Supports complex emoji sequences, including skin tones, flags, and joined emoji.
+- **Images in the terminal** — An application can draw a picture inline in the text with the kitty
+  graphics protocol (`timg -p k`). PNG payloads, optionally zlib-compressed, and raw RGB/RGBA pixels
+  are decoded; the picture is placed at the cursor, sized from the terminal's cell pixel size, scrolls
+  with the text around it, stays in scrollback, and never covers the text drawn over it.
 - **Text and colors** — UTF-8 text, 16-color, 256-color, and 24-bit truecolor support.
 - **Scrollback** — Retains history (2000 lines by default) and scrolls with the mouse wheel or the
   keyboard; new output snaps the view back to the live bottom.
@@ -45,6 +49,8 @@ Kai-Term is currently a working prototype. It builds cleanly, runs a shell, and 
 - FreeType
 - fontconfig
 - HarfBuzz
+- libpng
+- zlib
 - wayland-scanner
 - wayland-protocols
 
@@ -102,6 +108,28 @@ The default startup directory is the user's home directory. You can change it in
 | `-h` | `--help` | Show the option list and exit |
 
 Long options also accept the `--name=VALUE` form (for example `--workingdir=/tmp`).
+
+### Images
+
+Kai-Term speaks the kitty graphics protocol: an application sends a picture as one or more escape
+sequences, Kai-Term decodes it and draws it between the cell backgrounds and the text, so the text
+stays readable on top of it. The picture is placed at the cursor, sized from the cell pixel size
+(Kai-Term reports that to the shell in the PTY window size, and answers `CSI 14 t` / `CSI 16 t` for
+applications that ask), scrolls with the text around it, and comes back when you scroll into history.
+
+With [timg](https://timg.sh) installed:
+
+```sh
+timg -p k foo.png        # -p k selects the protocol Kai-Term understands
+```
+
+The picture appears at the cursor and the prompt lands below it. The mouse wheel or `Shift`+`PageUp`
+bring it back after it has scrolled off; `clear` drops it together with the history.
+
+timg does not choose that protocol by itself: it auto-detects graphics only on terminals whose `TERM`
+is `xterm-kitty` or `xterm-ghostty` (measured with timg 1.6.3). Without `-p k` it draws the picture
+with quarter-block characters instead, which needs no terminal support at all. What else is not
+supported is listed in [ISSUES.md](ISSUES.md) under "Known limitations".
 
 Command-line options take precedence over configuration values. Everything that describes how the
 terminal looks — font, font size, columns, rows, scrollback, colours, opacity — is configured in the

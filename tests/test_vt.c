@@ -145,6 +145,127 @@ static int utf8_len(const char *s)
     return n;
 }
 
+/* ---------- graphics helpers (the kitty image protocol, src/vt.c) ---------- */
+
+/* base64 for the payloads these tests transmit. The decoder under test is static in src/vt.c, so the
+   test carries its own encoder: a bug in one cannot hide a bug in the other. */
+static const char B64ALPHA[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static void b64enc(const uint8_t *in, size_t n, char *out)
+{
+    size_t o = 0;
+    for (size_t i = 0; i < n; i += 3) {
+        unsigned v = (unsigned)in[i] << 16;
+        int have = 1;
+        if (i + 1 < n) { v |= (unsigned)in[i + 1] << 8; have++; }
+        if (i + 2 < n) { v |= (unsigned)in[i + 2]; have++; }
+        for (int k = 0; k <= have; k++)
+            out[o++] = B64ALPHA[(v >> (18 - 6 * k)) & 0x3f];
+        for (int k = have + 1; k < 4; k++)
+            out[o++] = '=';
+    }
+    out[o] = 0;
+}
+
+/* One APC chunk in the shape timg 1.6.3 really emits (measured, see AGENT.md s68):
+   ESC _ G <control block, keys separated by ','> ; <base64 payload> ESC \ */
+static void gfx_feed(Term *t, const char *ctl, const uint8_t *payload, size_t n)
+{
+    char *b64 = malloc((n / 3 + 1) * 4 + 8);
+    b64enc(payload, n, b64);
+    char *buf = malloc(16 + strlen(ctl) + strlen(b64) + 8);
+    size_t o = 0;
+    buf[o++] = 0x1b;
+    buf[o++] = '_';
+    buf[o++] = 'G';
+    memcpy(buf + o, ctl, strlen(ctl));
+    o += strlen(ctl);
+    if (n) {
+        buf[o++] = ';';
+        memcpy(buf + o, b64, strlen(b64));
+        o += strlen(b64);
+    }
+    buf[o++] = 0x1b;
+    buf[o++] = '\\';
+    term_parse(t, (const uint8_t *)buf, o);
+    free(buf);
+    free(b64);
+}
+
+static void fill_rgba(uint8_t *p, int w, int h, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+{
+    for (int i = 0; i < w * h; i++) {
+        p[i * 4 + 0] = r;
+        p[i * 4 + 1] = g;
+        p[i * 4 + 2] = b;
+        p[i * 4 + 3] = a;
+    }
+}
+
+static KImage *img_by_id(Term *t, int id)
+{
+    for (KImage *im = t->images; im; im = im->next)
+        if (im->app_id == id)
+            return im;
+    return NULL;
+}
+
+/* the ImgView slot one application id was placed in, or -1 */
+static int view_of(const ImgView *view, int n, int id)
+{
+    for (int i = 0; i < n; i++)
+        if (view[i].img->app_id == id)
+            return i;
+    return -1;
+}
+
+/* An 8x8 RGBA PNG (8-bit, non-interlaced) and the same bytes inside a zlib stream: the two payload
+   shapes timg 1.6.3 emits (f=100 with and without --compress). Generated with python3/zlib, kept as
+   literals so the test needs no image file and no encoder of its own. */
+static const uint8_t PNG8[226] = {
+    0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0x00,0x00,0x00,0x0d,
+    0x49,0x48,0x44,0x52,0x00,0x00,0x00,0x08,0x00,0x00,0x00,0x08,
+    0x08,0x06,0x00,0x00,0x00,0xc4,0x0f,0xbe,0x8b,0x00,0x00,0x00,
+    0xa9,0x49,0x44,0x41,0x54,0x78,0x9c,0x0d,0xca,0x21,0x81,0xc4,
+    0x50,0x0c,0x45,0xd1,0x80,0x91,0x30,0x60,0x51,0xf0,0x88,0x88,
+    0x88,0xe2,0xe0,0x8a,0x78,0x22,0x3e,0x0e,0xfe,0x22,0x22,0xa2,
+    0x38,0xb8,0x22,0xea,0xe0,0x6e,0x0f,0x3e,0x66,0x66,0xb8,0x7d,
+    0x09,0xfb,0x91,0x16,0xc8,0x0e,0xca,0x4e,0xda,0xc4,0xd8,0xc2,
+    0xcc,0xbf,0xb8,0xff,0x08,0x0f,0xd2,0x0f,0xe4,0x27,0xe5,0xa2,
+    0x7d,0x31,0xbe,0xdf,0x10,0x3f,0x3c,0x82,0x88,0x83,0x8c,0x13,
+    0x85,0xa8,0x58,0x74,0x6c,0x26,0xfa,0x0d,0x19,0x78,0x1e,0x44,
+    0x9e,0x64,0x0a,0xe5,0xa2,0x72,0xd3,0xd9,0x4c,0x5e,0x6f,0xd0,
+    0x81,0xeb,0x24,0x24,0x52,0x0b,0x69,0x53,0x6a,0x5a,0x17,0xa3,
+    0xfb,0x0d,0x75,0xe2,0x25,0xa2,0x16,0x59,0x1b,0x55,0x53,0x75,
+    0xd1,0x75,0x33,0xf5,0xbc,0xa1,0x85,0xf7,0x22,0x7a,0x93,0xdd,
+    0xa8,0x2f,0xaa,0x6f,0xba,0x1f,0xa6,0x3f,0x6f,0x98,0x85,0xcf,
+    0x26,0xa6,0xc9,0xb9,0xd0,0xdc,0xd4,0x3c,0xf4,0x7c,0x98,0xf9,
+    0xe3,0x1f,0x1e,0x44,0x94,0x41,0x17,0x18,0x37,0xfe,0x00,0x00,
+    0x00,0x00,0x49,0x45,0x4e,0x44,0xae,0x42,0x60,0x82,
+};
+static const uint8_t PNG8_ZLIB[237] = {
+    0x78,0xda,0x01,0xe2,0x00,0x1d,0xff,0x89,0x50,0x4e,0x47,0x0d,
+    0x0a,0x1a,0x0a,0x00,0x00,0x00,0x0d,0x49,0x48,0x44,0x52,0x00,
+    0x00,0x00,0x08,0x00,0x00,0x00,0x08,0x08,0x06,0x00,0x00,0x00,
+    0xc4,0x0f,0xbe,0x8b,0x00,0x00,0x00,0xa9,0x49,0x44,0x41,0x54,
+    0x78,0x9c,0x0d,0xca,0x21,0x81,0xc4,0x50,0x0c,0x45,0xd1,0x80,
+    0x91,0x30,0x60,0x51,0xf0,0x88,0x88,0x88,0xe2,0xe0,0x8a,0x78,
+    0x22,0x3e,0x0e,0xfe,0x22,0x22,0xa2,0x38,0xb8,0x22,0xea,0xe0,
+    0x6e,0x0f,0x3e,0x66,0x66,0xb8,0x7d,0x09,0xfb,0x91,0x16,0xc8,
+    0x0e,0xca,0x4e,0xda,0xc4,0xd8,0xc2,0xcc,0xbf,0xb8,0xff,0x08,
+    0x0f,0xd2,0x0f,0xe4,0x27,0xe5,0xa2,0x7d,0x31,0xbe,0xdf,0x10,
+    0x3f,0x3c,0x82,0x88,0x83,0x8c,0x13,0x85,0xa8,0x58,0x74,0x6c,
+    0x26,0xfa,0x0d,0x19,0x78,0x1e,0x44,0x9e,0x64,0x0a,0xe5,0xa2,
+    0x72,0xd3,0xd9,0x4c,0x5e,0x6f,0xd0,0x81,0xeb,0x24,0x24,0x52,
+    0x0b,0x69,0x53,0x6a,0x5a,0x17,0xa3,0xfb,0x0d,0x75,0xe2,0x25,
+    0xa2,0x16,0x59,0x1b,0x55,0x53,0x75,0xd1,0x75,0x33,0xf5,0xbc,
+    0xa1,0x85,0xf7,0x22,0x7a,0x93,0xdd,0xa8,0x2f,0xaa,0x6f,0xba,
+    0x1f,0xa6,0x3f,0x6f,0x98,0x85,0xcf,0x26,0xa6,0xc9,0xb9,0xd0,
+    0xdc,0xd4,0x3c,0xf4,0x7c,0x98,0xf9,0xe3,0x1f,0x1e,0x44,0x94,
+    0x41,0x17,0x18,0x37,0xfe,0x00,0x00,0x00,0x00,0x49,0x45,0x4e,
+    0x44,0xae,0x42,0x60,0x82,0x96,0x43,0x5d,0x9a,
+};
+
 int main(void)
 {
     term_init(&T, 10, 20, 100);
@@ -1835,6 +1956,255 @@ int main(void)
         CHECK(iw == 640 && ih == 248,
               "layout: padding 0 with a square cell gives the edge-to-edge startup size");
     }
+
+    /* ---------- graphics: the kitty image protocol (src/vt.c) ----------
+       Headless on purpose: the decoded PIXELS live in the model, so the parser, the chunk assembly,
+       the placement math and the lifetime rules are all testable without a display — render.c only
+       turns KImage.rgba into a GL texture. Cell px 8x16 is what src/main.c pushes from the font
+       metrics, and the protocol sizes pictures in PIXELS, so every span below depends on it. */
+    term_destroy(&T);
+    term_init(&T, 10, 20, 100);
+    term_set_cell_px(&T, 8, 16);
+    ImgView view[16];
+    int nv;
+
+    /* --- a=T transmits, displays, and moves the cursor below the picture --- */
+    uint8_t px4[16];
+    fill_rgba(px4, 2, 2, 0xff, 0x80, 0x40, 0xff);
+    gfx_feed(&T, "a=T,i=1,q=2,f=32,s=2,r=2,m=0", px4, sizeof px4);
+    CHECK(term_image_count(&T) == 1, "graphics: a=T creates one image");
+    KImage *im = img_by_id(&T, 1);
+    CHECK(im && im->w == 2 && im->h == 2, "graphics: raw f=32 with s=/r= gives the pixel size");
+    CHECK(im && im->shown, "graphics: a=T marks the image as displayed");
+    CHECK(im && im->rgba[0] == 0xff && im->rgba[1] == 0x80 && im->rgba[3] == 0xff,
+          "graphics: an opaque texel survives premultiplication unchanged");
+    CHECK(T.cy == 1, "graphics: a=T moves the cursor past the picture's rows");
+    nv = term_visible_images(&T, view, 16);
+    CHECK(nv == 1 && view[0].crow == 0 && view[0].ccol == 0 &&
+          view[0].crows == 1 && view[0].ccols == 1,
+          "graphics: a 2x2 px picture covers one cell of an 8x16 grid");
+
+    /* --- premultiplication, the rule the no-blending shader depends on ---
+       The +255 rounding s68 used made (255*255 + 255)/255 == 256, and the uint8_t cast turned a fully
+       opaque WHITE pixel BLACK. The s68 probe missed it because its sample pixel was never white. */
+    uint8_t opaque_white[4] = { 0xff, 0xff, 0xff, 0xff };
+    gfx_feed(&T, "a=T,i=2,q=2,f=32,s=1,r=1,m=0", opaque_white, 4);
+    im = img_by_id(&T, 2);
+    CHECK(im && im->rgba[0] == 0xff && im->rgba[1] == 0xff && im->rgba[2] == 0xff &&
+          im->rgba[3] == 0xff, "graphics: a premultiplied opaque white texel stays white");
+    uint8_t half_red[4] = { 0xff, 0x00, 0x00, 0x80 };
+    gfx_feed(&T, "a=T,i=3,q=2,f=32,s=1,r=1,m=0", half_red, 4);
+    im = img_by_id(&T, 3);
+    CHECK(im && im->rgba[0] == 0x80 && im->rgba[3] == 0x80,
+          "graphics: texels are premultiplied by their own alpha");
+
+    /* --- chunked transmission: only the first chunk carries the control block (timg's shape) --- */
+    uint8_t px64[64];
+    fill_rgba(px64, 4, 4, 0x10, 0x20, 0x30, 0xff);
+    gfx_feed(&T, "a=T,i=4,q=2,f=32,s=4,r=4,m=1", px64, 32);
+    CHECK(term_image_count(&T) == 3, "graphics: an m=1 chunk is not an image yet");
+    gfx_feed(&T, "q=2,m=0", px64 + 32, 32);          /* continuation: no a=, no i= */
+    CHECK(term_image_count(&T) == 4, "graphics: the closing chunk completes the image");
+    im = img_by_id(&T, 4);
+    CHECK(im && im->w == 4 && im->h == 4, "graphics: the chunks assembled into one payload");
+    CHECK(im && im->rgba[60] == 0x10 && im->rgba[63] == 0xff,
+          "graphics: the continuation chunk's bytes are in the payload");
+
+    /* --- a=t stores without displaying; a=p places it later --- */
+    gfx_feed(&T, "a=t,i=5,q=2,f=32,s=2,r=2,m=0", px4, sizeof px4);
+    CHECK(term_image_count(&T) == 5, "graphics: a=t stores the image");
+    CHECK(term_visible_images(&T, view, 16) == 4, "graphics: an unplaced picture is never drawn");
+    feed("\x1b[5;3H");
+    T.resp_len = 0;
+    gfx_feed(&T, "a=p,i=5,q=1", NULL, 0);
+    CHECK(T.cy == 4 && T.cx == 2, "graphics: a=p places without moving the cursor");
+    nv = term_visible_images(&T, view, 16);
+    int vi = view_of(view, nv, 5);
+    CHECK(nv == 5 && vi >= 0 && view[vi].crow == 4 && view[vi].ccol == 2,
+          "graphics: a=p places the stored picture at the cursor");
+    CHECK(strstr(T.resp, "\x1b_G:OK;i=5") != NULL, "graphics: q=1 answers OK");
+
+    /* --- re-transmitting to an id replaces that picture instead of stacking another one ---
+       Measured with timg 1.6.3 -V (see AGENT.md s70): a four-frame gif alternates between TWO ids, so
+       three of its four frames are transmissions to an id that already exists. Treating every
+       transmission as new leaves a trail of pictures behind an animation. */
+    int n_before = term_image_count(&T);
+    gfx_feed(&T, "a=T,i=11,q=2,f=32,s=1,r=1,m=0", opaque_white, 4);
+    CHECK(term_image_count(&T) == n_before + 1,
+          "graphics: the first transmission to a fresh id adds a picture");
+    im = img_by_id(&T, 11);
+    int ver = im ? im->version : 0;
+    int cy_before = T.cy;
+    gfx_feed(&T, "a=T,i=11,q=2,f=32,s=1,r=1,m=0", half_red, 4);
+    CHECK(term_image_count(&T) == n_before + 1,
+          "graphics: a=T to an id that exists does not add a second picture");
+    im = img_by_id(&T, 11);
+    CHECK(im && im->version == ver + 1,
+          "graphics: the replacement bumps the version the renderer watches");
+    CHECK(im && im->rgba[0] == 0x80 && im->rgba[3] == 0x80,
+          "graphics: the id now holds the new pixels, not the old ones");
+    CHECK(T.cy == cy_before + 1,
+          "graphics: a=T still moves the cursor past the picture it re-placed");
+    int64_t doc_row_after = im ? im->doc_row : -1;
+    int cy_after = T.cy;
+    gfx_feed(&T, "a=t,i=11,q=2,f=32,s=1,r=1,m=0", opaque_white, 4);
+    im = img_by_id(&T, 11);
+    CHECK(term_image_count(&T) == n_before + 1 && im && im->doc_row == doc_row_after &&
+          T.cy == cy_after,
+          "graphics: a=t replaces the data without moving the picture or the cursor");
+
+    /* --- PNG is the format timg really sends (f=100), raw or zlib-wrapped --- */
+    feed("\x1b[2J\x1b[H");
+    gfx_feed(&T, "a=T,i=6,q=2,f=100,m=0", PNG8, sizeof PNG8);
+    im = img_by_id(&T, 6);
+    CHECK(im && im->w == 8 && im->h == 8, "graphics: a PNG payload decodes to its own size");
+    CHECK(im && im->rgba[4] == 30 && im->rgba[5] == 0 && im->rgba[6] == 20 && im->rgba[7] == 0xff,
+          "graphics: the PNG's second pixel comes through");
+    gfx_feed(&T, "a=T,i=7,q=2,f=100,m=0", PNG8_ZLIB, sizeof PNG8_ZLIB);
+    im = img_by_id(&T, 7);
+    CHECK(im && im->w == 8 && im->h == 8, "graphics: a zlib-wrapped payload is inflated first");
+
+    /* --- an explicit c= with no r= derives the height from the picture's aspect ratio --- */
+    feed("\x1b[2J\x1b[H");
+    gfx_feed(&T, "a=T,i=8,q=2,f=100,c=4,m=0", PNG8, sizeof PNG8);
+    nv = term_visible_images(&T, view, 16);
+    vi = view_of(view, nv, 8);
+    CHECK(vi >= 0 && view[vi].ccols == 4 && view[vi].crows == 2,
+          "graphics: c=4 of an 8x8 px picture in 8x16 cells spans 4x2 cells");
+    CHECK(T.cy == 2, "graphics: the cursor moves past the derived height, not the pixel height");
+
+    /* --- z= decides the draw order, and a negative z= must parse --- */
+    feed("\x1b[2J\x1b[H");
+    gfx_feed(&T, "a=T,i=9,q=2,f=32,s=2,r=2,z=5,m=0", px4, sizeof px4);
+    feed("\r\n");
+    gfx_feed(&T, "a=T,i=10,q=2,f=32,s=2,r=2,z=-5,m=0", px4, sizeof px4);
+    nv = term_visible_images(&T, view, 16);
+    int z_hi = view_of(view, nv, 9), z_lo = view_of(view, nv, 10);
+    CHECK(z_hi >= 0 && z_lo >= 0 && z_lo < z_hi, "graphics: z=-5 is drawn before z=5");
+
+    /* --- a=d deletes --- */
+    int n_alive = term_image_count(&T);
+    gfx_feed(&T, "a=d,i=9", NULL, 0);
+    CHECK(img_by_id(&T, 9) == NULL, "graphics: a=d,i= deletes that image");
+    CHECK(term_image_count(&T) == n_alive - 1, "graphics: exactly one image went away");
+    gfx_feed(&T, "a=d,d=A", NULL, 0);
+    CHECK(term_image_count(&T) == 0, "graphics: a=d,d=A deletes every image");
+
+    /* --- a cursor left at the right margin places the picture at the start of the next row ---
+       Real `timg -p k` output hit exactly this (s69): its own text had filled a line, so the cursor
+       was in the pending-wrap state, and the picture was anchored at col == cols — decoded fine and
+       never drawn. */
+    term_destroy(&T);
+    term_init(&T, 10, 20, 100);
+    term_set_cell_px(&T, 8, 16);
+    feed("01234567890123456789");           /* exactly 20 columns */
+    CHECK(T.cx == 20, "graphics: the cursor is in the pending-wrap state after a full line");
+    gfx_feed(&T, "a=T,i=1,q=2,f=32,s=2,r=2,m=0", px4, sizeof px4);
+    nv = term_visible_images(&T, view, 16);
+    CHECK(nv == 1 && view[0].crow == 1 && view[0].ccol == 0,
+          "graphics: a picture placed at the right margin starts the next row");
+
+    /* --- a picture scrolls with its text, leaves the screen, and comes back from history --- */
+    term_destroy(&T);
+    term_init(&T, 10, 20, 100);
+    term_set_cell_px(&T, 8, 16);
+    for (int i = 0; i < 5; i++)
+        feed("text\r\n");
+    gfx_feed(&T, "a=T,i=1,q=2,f=32,s=2,r=2,m=0", px4, sizeof px4);   /* anchored to row 5 */
+    for (int i = 0; i < 40; i++)
+        feed("more\r\n");
+    CHECK(term_image_count(&T) == 1, "graphics: a scrolled-out picture is kept, not dropped");
+    CHECK(term_visible_images(&T, view, 16) == 0, "graphics: a picture above the viewport is not drawn");
+    T.g.scroll_off = 0;                       /* the user scrolls to the oldest line */
+    nv = term_visible_images(&T, view, 16);
+    CHECK(nv == 1 && view[0].crow == 5, "graphics: it comes back at its own history row");
+    for (int i = 0; i < 200; i++)
+        feed("more\r\n");
+    CHECK(term_image_count(&T) == 0, "graphics: a picture whose rows were evicted is freed");
+
+    /* --- CSI 3 J erases the history the picture was anchored in --- */
+    term_destroy(&T);
+    term_init(&T, 10, 20, 100);
+    term_set_cell_px(&T, 8, 16);
+    for (int i = 0; i < 5; i++)
+        feed("text\r\n");
+    gfx_feed(&T, "a=T,i=1,q=2,f=32,s=2,r=2,m=0", px4, sizeof px4);
+    for (int i = 0; i < 40; i++)
+        feed("more\r\n");
+    feed("\x1b[3J");
+    CHECK(term_image_count(&T) == 0, "graphics: CSI 3 J drops pictures anchored in the erased history");
+
+    /* --- reflow keeps a picture attached to the text it was printed next to --- */
+    term_destroy(&T);
+    term_init(&T, 10, 20, 100);
+    term_set_cell_px(&T, 8, 16);
+    for (int i = 0; i < 5; i++) {
+        char line[32];
+        snprintf(line, sizeof line, "%d_________________\r\n", i);   /* exactly 20 columns */
+        feed(line);
+    }
+    gfx_feed(&T, "a=T,i=1,q=2,f=32,s=2,r=2,m=0", px4, sizeof px4);   /* anchored to row 5 */
+    term_resize(&T, 10, 10);                  /* every line now wraps to two rows */
+    int last_text = -1;
+    for (int y = 0; y < T.g.rows; y++) {
+        row_text(y, row);
+        int blank = 1;
+        for (int x = 0; x < T.g.cols; x++)
+            if (row[x] != ' ') { blank = 0; break; }
+        if (!blank)
+            last_text = y;
+    }
+    nv = term_visible_images(&T, view, 16);
+    CHECK(nv == 1 && view[0].crow == last_text + 1,
+          "graphics: after a re-wrap the picture still sits on the row after its line");
+
+    /* --- DCS is discarded: sixel output must not be painted into the grid as text --- */
+    feed("\x1b[2J\x1b[H");
+    feed("\x1bPq0;1;2;1;0,0,0.FF.FF\x1b\\");
+    row_text(0, row);
+    CHECK(row[0] == ' ', "graphics: a DCS (sixel) sequence never reaches the grid");
+    feed("A");
+    CHECK(cellch(0, 0) == 'A', "graphics: the parser is back on the ground after a DCS");
+    feed("\x1b_XYZ garbage\x1b\\B");
+    CHECK(cellch(0, 1) == 'B' && cellch(0, 0) == 'A', "graphics: a non-graphics APC is discarded too");
+
+    /* --- the pixel-geometry queries a tool falls back to when it cannot read the PTY winsize --- */
+    T.resp_len = 0;
+    feed("\x1b[16t");
+    CHECK(strstr(T.resp, "\x1b[6;16;8t") != NULL, "graphics: CSI 16 t answers the cell size in px");
+    T.resp_len = 0;
+    feed("\x1b[14t");
+    CHECK(strstr(T.resp, "\x1b[4;160;80t") != NULL, "graphics: CSI 14 t answers the text area in px");
+    term_set_cell_px(&T, 0, 0);
+    T.resp_len = 0;
+    feed("\x1b[16t");
+    CHECK(T.resp_len == 0, "graphics: no cell size known means no answer, like any other terminal");
+
+    /* --- device attributes / status report: what an application reads to decide what to send --- */
+    T.resp_len = 0;
+    feed("\x1b[c");
+    CHECK(strcmp(T.resp, "\x1b[?64;1;2;6;7;12;22c") == 0,
+          "graphics: DA1 answers with no graphics capability");
+    CHECK(strstr(T.resp, ";4;") == NULL && strstr(T.resp, ";16;") == NULL &&
+          strstr(T.resp, ";18;") == NULL,
+          "graphics: DA1 must not claim sixel/ReGIS — measured, `;4` makes timg 1.6.3 emit sixel, which "
+          "the DCS discard then throws away, so the picture vanishes instead of falling back to blocks");
+    T.resp_len = 0;
+    feed("\x1b[>c");
+    CHECK(strcmp(T.resp, "\x1b[>0;0;0c") == 0, "graphics: DA2 (ESC[>c) is answered");
+    T.resp_len = 0;
+    feed("\x1b[5n");
+    CHECK(strcmp(T.resp, "\x1b[0n") == 0, "graphics: CSI 5 n (DSR) is answered with ESC[0n");
+    T.resp_len = 0;
+    feed("\x1b[6n");
+    CHECK(T.resp_len > 0 && strstr(T.resp, "R") != NULL, "graphics: CSI 6 n still reports the cursor");
+
+    /* Left on purpose: the term_destroy below must free the images and the APC buffers, and the same
+       sources are built as bin/test_vt_asan and run under LeakSanitizer by `make asan`. */
+    term_set_cell_px(&T, 8, 16);
+    gfx_feed(&T, "a=T,i=2,q=2,f=32,s=2,r=2,m=0", px4, sizeof px4);
+    CHECK(term_image_count(&T) == 2 && img_by_id(&T, 2) != NULL,
+          "graphics: two pictures are alive for term_destroy to free (the reflow one and this one)");
 
     term_destroy(&T);
 

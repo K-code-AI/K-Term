@@ -3,6 +3,8 @@
 
 #include <errno.h>
 #include <unistd.h>
+#include <zlib.h>
+#include <png.h>
 
 int kai_term_loglevel = L_WARN;
 
@@ -15,6 +17,9 @@ static void cluster_invalidate(Term *t);
 static void pen_default(Term *t);
 static void alt_screen_enter(Term *t, int save_cursor);
 static void alt_screen_leave(Term *t, int restore_cursor);
+/* defined in the graphics section below, used by term_init/term_destroy */
+static void term_free_images(Term *t);
+static void kitty_tx_free(Parser *ps);
 
 void klog(int level, const char *fmt, ...)
 {
@@ -252,6 +257,7 @@ void grid_init(Grid *g, int rows, int cols, int scrollback)
     g->scrollback_max = scrollback;
     g->scroll_off = 0;
     g->live_off = 0;
+    g->row_base = 0;
     g->rcap = rows + scrollback;
     g->valid = GRID_VALID;
     g->row = calloc((size_t)g->rcap, sizeof(Cell *));
@@ -472,6 +478,12 @@ static void grid_reflow(Grid *g, int new_cols, int *slot, int *col)
     /* the newest content stays anchored at the bottom of the viewport */
     g->live_off = iclamp_(kept - g->rows, 0, sb_limit(g));
     g->scroll_off = g->live_off;
+    /* Re-number the document rows: the newest row keeps its absolute number, so slot kept-1 must
+       still be document row row_base + used - 1. Narrowing makes `kept` grow (row_base falls),
+       widening merges rows (row_base rises), and evicting the oldest lines is what keeps the
+       newest-row identity fixed. Images anchored to a document row therefore keep their distance
+       from the newest text across a re-wrap instead of jumping to an arbitrary row. */
+    g->row_base += (int64_t)used - kept;
 
     if (slot) {
         if (out_row >= 0) {
@@ -521,6 +533,7 @@ static void grid_resize_rows(Grid *g, int rows, int cur_slot)
             } else {
                 rot_left(g->row, g->wrap, used);
                 grid_blank_slot(g, used - 1, DEF_BG);
+                g->row_base++;        /* oldest document row evicted (see KImage) */
                 g->live_off = g->scroll_off;
             }
             g->rows--;
@@ -640,6 +653,16 @@ void term_init(Term *t, int rows, int cols, int scrollback)
     }
     if (t->g.valid == GRID_VALID)
         grid_destroy(&t->g);            /* free old main grid buffers (fixes RIS leak) */
+    if (t->g.valid == GRID_VALID) {
+        /* A real reset: the screen and everything anchored to it goes. The GRID_VALID guard is not
+           decoration — term_init also runs on a never-initialized Term, where stack garbage is
+           routinely non-zero, and freeing a garbage pointer is a crash. Same reason grid_destroy
+           is guarded. */
+        term_free_images(t);
+        free(t->ps.apc);
+        t->ps.apc = NULL;
+        kitty_tx_free(&t->ps);
+    }
     memset(t, 0, sizeof(*t));
     grid_init(&t->g, rows, cols, scrollback);
     t->top = 0;
@@ -927,6 +950,12 @@ int term_selection_text(Term *t, char *out, size_t cap)
 
 void term_destroy(Term *t)
 {
+    if (t->g.valid == GRID_VALID) {
+        term_free_images(t);
+        free(t->ps.apc);
+        t->ps.apc = NULL;
+        kitty_tx_free(&t->ps);
+    }
     if (t->alt_screen) {
         grid_destroy(&t->g);            /* alt grid */
         grid_destroy(&t->alt);          /* saved main grid */
@@ -1134,6 +1163,7 @@ static void scroll_up(Term *t, int top, int bot)
         int used = so + g->rows;
         rot_left(g->row, g->wrap, used);
         grid_blank_slot(g, used - 1, t->pen.bg);
+        g->row_base++;          /* the oldest document row no longer exists (see KImage) */
         g->live_off = g->scroll_off;   /* saturated at sb_limit() */
     } else {
         /* Partial scroll region, or no scrollback configured: rotate inside
@@ -1265,6 +1295,10 @@ static void erase_scrollback(Term *t)
     memcpy(g->wrap, tmpw, (size_t)g->rcap);
     free(tmp);
     free(tmpw);
+    /* The viewport moved to slots 0..rows-1, i.e. up `so` slots, so the absolute number of slot 0
+       moves the other way: the rows that were above the viewport are gone. Anything anchored to
+       one of them is dropped by image_prune() at the end of the parse. */
+    g->row_base += so;
     for (int y = g->rows; y < g->rcap; y++)
         grid_blank_slot(g, y, t->pen.bg);
     g->scroll_off = 0;
@@ -1365,6 +1399,20 @@ static void set_cursor_pos(Term *t, int row, int col)
     cluster_invalidate(t);
 }
 
+/* Queue a response string for the PTY; main.c flushes Term.resp after every parse. Kept as a
+   function so the graphics code can answer queries too (the macro below used to be the only way). */
+static void term_respond(Term *t, const char *fmt, ...)
+{
+    if (t->resp_len >= (int)sizeof(t->resp) - 64)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(t->resp + t->resp_len, sizeof(t->resp) - (size_t)t->resp_len, fmt, ap);
+    va_end(ap);
+    if (n > 0)
+        t->resp_len += n;
+}
+
 static void csi_dispatch(Term *t, int fin)
 {
     cluster_invalidate(t);   /* any CSI may move the cursor or the rows */
@@ -1375,12 +1423,7 @@ static void csi_dispatch(Term *t, int fin)
     int p2 = t->ps.par[1] ? iclamp_(t->ps.par[1], 0, 65535) : 1;   /* VT default 1 */
 
     /* Queue a response string to be written back to the PTY by main.c. */
-    #define TERM_RESP(t_, fmt_, ...) do { \
-        if ((t_)->resp_len < (int)sizeof((t_)->resp) - 64) { \
-            (t_)->resp_len += snprintf((t_)->resp + (t_)->resp_len, \
-                sizeof((t_)->resp) - (t_)->resp_len, fmt_, ##__VA_ARGS__); \
-        } \
-    } while(0)
+    #define TERM_RESP(t_, ...) term_respond((t_), __VA_ARGS__)
 
     if (t->ps.priv) {
         switch (fin) {
@@ -1473,6 +1516,20 @@ static void csi_dispatch(Term *t, int fin)
     }
     case 's': t->save_cx = t->cx; t->save_cy = t->cy; break;
     case 'u': set_cursor_pos(t, t->save_cy, t->save_cx); break;
+    case 't': {
+        /* xterm window-geometry queries. `ESC[16t` asks for one CELL in px, `ESC[14t` for the text
+           area; an image application uses them when it cannot read the PTY winsize (over ssh, for
+           example), which is the same information timg needs to pick a graphics protocol. Answered
+           only once main.c has told us the cell size, so a tool falls back the same way it does for
+           a terminal that has no answer. */
+        if (t->cell_w > 0 && t->cell_h > 0) {
+            if (def1 == 16)
+                TERM_RESP(t, "\x1b[6;%d;%dt", t->cell_h, t->cell_w);
+            else if (def1 == 14)
+                TERM_RESP(t, "\x1b[4;%d;%dt", t->g.rows * t->cell_h, t->g.cols * t->cell_w);
+        }
+        break;
+    }
     case 'm': {
         for (int i = 0; i <= t->ps.npar; i++) {
             int p = t->ps.par[i];
@@ -1577,6 +1634,12 @@ static void csi_dispatch(Term *t, int fin)
         if (def1 == 6) {
             /* Cursor Position Report (CPR) query: ESC[6n -> respond ESC[{row};{col}R */
             TERM_RESP(t, "\x1b[%d;%dR", t->cy + 1, t->cx + 1);
+        } else if (def1 == 5) {
+            /* DSR status report: ESC[5n -> ESC[0n ("terminal in functioning state"). Applications use
+               it as a cheap "is anyone there" probe -- timg sends ESC[>q ESC[5n as its first query and
+               sits in a 250 ms timeout until something answers. Not answering is not harmful, it is
+               just slow, and answering is what every terminal does. */
+            TERM_RESP(t, "\x1b[0n");
         }
         break;
     case 'c':
@@ -1584,14 +1647,806 @@ static void csi_dispatch(Term *t, int fin)
             /* DA2 (Secondary Device Attributes): ESC[>c */
             TERM_RESP(t, "\x1b[>0;0;0c");
         } else {
-            /* DA1 (Primary Device Attributes): ESC[c or ESC[0c */
-            TERM_RESP(t, "\x1b[?64;1;2;4;6;7;12;16;18;22c");
+            /* DA1 (Primary Device Attributes): ESC[c or ESC[0c. The list deliberately claims NO
+               graphics capability: 4 (sixel), 16 (sixel + ReGIS) and 18 (sixel, wide pixels) are not
+               implemented -- the parser discards DCS, so sixel never reaches the screen -- and an
+               application that trusts the claim sends a picture that is then thrown away. Measured
+               with timg 1.6.3: with `;4` in this answer it switches to sixel and the picture
+               disappears; without it it falls back to quarter blocks, which at least draw. */
+            TERM_RESP(t, "\x1b[?64;1;2;6;7;12;22c");
         }
         break;
     default:
         break;   /* unimplemented CSI ignored */
     }
     #undef TERM_RESP
+}
+
+/* ================= graphics: the kitty image protocol =================
+ *
+ * An application draws an image with one or more APC sequences:
+ *
+ *     ESC _ G  key=value ; ... ; key=value : <base64 payload>  ESC \
+ *
+ * What timg 1.6.3 really emits (captured, see AGENT.md s68) is
+ *
+ *     ESC_Ga=T,i=<id>,q=2,f=100,m=1;<4096 base64 chars>ESC\        first chunk
+ *     ESC_Gq=2,m=0;<rest>ESC\                                     continuation: no a=, no i=
+ *
+ * so `m` is the "more chunks follow" flag here and `f=100` says the payload is a PNG. The
+ * protocol overloads `r`: height in px for the raw formats (f=24/32), rows of the grid for the
+ * self-describing ones. It never says how many CELLS an image covers in the common case — the
+ * terminal is expected to divide the pixel size by its own cell size, which is why main.c pushes
+ * the cell size into Term.cell_w/cell_h and the PTY winsize.
+ *
+ * Lifetime: an image is anchored to an ABSOLUTE grid row (Grid.row_base), so it scrolls with the
+ * text it was printed next to, is clipped at the viewport edges and comes back when the user
+ * scrolls up into history. image_prune() drops the ones whose rows no longer exist; the byte
+ * budget drops the oldest when an application keeps sending pictures.
+ */
+
+#define IMAGE_BYTES_MAX (64LL << 20)     /* decoded bytes one session keeps */
+#define IMAGE_COUNT_MAX 256              /* images one session keeps */
+#define IMAGE_DIM_MAX   4096             /* accepted px per side */
+#define IMAGE_PIX_MAX   (16LL << 20)     /* accepted pixels per image */
+#define APC_BYTES_MAX   (32u << 20)      /* buffered APC payload (one sequence) */
+#define ZINFLATE_MAX    (64u << 20)      /* largest payload a compressed chunk may expand to */
+
+/* ---------- base64 ---------- */
+static int b64_val(int c)
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+/* Decode n base64 chars into out (room for (n/4+1)*3 bytes). Returns the byte count. Anything
+   outside the alphabet ends the stream, which covers padding and any stray whitespace.
+   The mask after each emitted byte is not cosmetic: without it `acc` keeps every bit it ever
+   collected, and by the fifth character `acc << 6` overflows int (UBSan caught it on the first
+   4-chunk payload this file feeds). Kept in unsigned so the shifts are defined anyway. */
+static size_t b64_decode(const char *s, size_t n, uint8_t *out)
+{
+    size_t o = 0;
+    unsigned acc = 0;
+    int bits = 0;
+    for (size_t i = 0; i < n; i++) {
+        int v = b64_val((unsigned char)s[i]);
+        if (v < 0)
+            break;
+        acc = (acc << 6) | (unsigned)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out[o++] = (uint8_t)((acc >> bits) & 0xff);
+            acc &= (1u << bits) - 1u;      /* keep only the bits not yet emitted */
+        }
+    }
+    return o;
+}
+
+/* ---------- payload decoding ---------- */
+
+/* zlib-wrapped payload. The protocol's compression flag is ambiguous in the wild (timg uses m= as
+   the more-chunks flag), so the payload's own bytes decide whether this is needed. */
+static uint8_t *zinflate(const uint8_t *in, size_t n, size_t *outlen)
+{
+    size_t cap = n * 4 + 1024;
+    for (int attempt = 0; attempt < 6; attempt++) {
+        uint8_t *buf = malloc(cap);
+        if (!buf)
+            return NULL;
+        z_stream zs;
+        memset(&zs, 0, sizeof zs);
+        if (inflateInit(&zs) != Z_OK) {
+            free(buf);
+            return NULL;
+        }
+        zs.next_in = (Bytef *)in;
+        zs.avail_in = (uInt)n;
+        zs.next_out = buf;
+        zs.avail_out = (uInt)cap;
+        int r = inflate(&zs, Z_FINISH);
+        size_t got = zs.total_out;
+        inflateEnd(&zs);
+        if (r == Z_STREAM_END) {
+            *outlen = got;
+            return buf;
+        }
+        free(buf);
+        if (r != Z_BUF_ERROR || cap >= ZINFLATE_MAX)
+            return NULL;
+        cap *= 4;
+    }
+    return NULL;
+}
+
+/* PNG through libpng's simplified API: it handles palette, 16-bit and interlaced input and
+   always hands over 8-bit RGBA, which is the one format the rest of this code has to know. */
+static uint8_t *decode_png(const uint8_t *mem, size_t n, int *w, int *h)
+{
+    png_image img;
+    memset(&img, 0, sizeof img);
+    img.version = PNG_IMAGE_VERSION;
+    if (!png_image_begin_read_from_memory(&img, mem, n)) {
+        klog(L_WARN, "graphics: png: %s", img.message);
+        return NULL;
+    }
+    if (img.width > IMAGE_DIM_MAX || img.height > IMAGE_DIM_MAX ||
+        (long long)img.width * (long long)img.height > IMAGE_PIX_MAX) {
+        klog(L_WARN, "graphics: png %ux%u too large", (unsigned)img.width, (unsigned)img.height);
+        png_image_free(&img);
+        return NULL;
+    }
+    img.format = PNG_FORMAT_RGBA;
+    size_t sz = PNG_IMAGE_SIZE(img);
+    uint8_t *out = malloc(sz ? sz : 1);
+    if (!out) {
+        png_image_free(&img);
+        return NULL;
+    }
+    if (!png_image_finish_read(&img, NULL, out, 0, NULL)) {
+        klog(L_WARN, "graphics: png read: %s", img.message);
+        png_image_free(&img);
+        free(out);
+        return NULL;
+    }
+    *w = (int)img.width;
+    *h = (int)img.height;
+    return out;
+}
+
+/* f=24 (RGB) / f=32 (RGBA): the raw pixels, whose size the application must have given.
+   The protocol is ambiguous about HOW it gives it: the kitty spec says s= is the byte size of the
+   uncompressed data and r= its row count (so width = s/(r*bpp)), while an encoder that treats s= as
+   the width sends s*r*bpp bytes. Nothing here can tell which one timg et al. use — timg only ever
+   emits PNG (measured, see AGENT.md s68) — so the payload length decides: a payload that is exactly
+   s*r*bpp bytes cannot be a (s/(r*bpp)) x r image, and one that is s bytes cannot be s columns wide.
+   Both readings are accepted rather than guessed at, and the raw path stays the least exercised part
+   of this protocol. */
+static uint8_t *decode_raw(int fmt, int s_val, int rows, const uint8_t *raw, size_t n, int *w, int *h)
+{
+    int bpp = fmt == 24 ? 3 : 4;
+    int pw = 0, ph = rows;
+    long long as_width = (long long)s_val * rows * bpp;      /* s= is the column count */
+    if (rows > 0 && as_width > 0 && (long long)n >= as_width) {
+        pw = s_val;
+    } else if (rows > 0 && s_val % (rows * bpp) == 0 && (long long)n >= (long long)s_val) {
+        pw = s_val / (rows * bpp);                           /* s= is the byte count */
+    }
+    if (pw < 1 || ph < 1 || pw > IMAGE_DIM_MAX || ph > IMAGE_DIM_MAX ||
+        (long long)pw * ph > IMAGE_PIX_MAX) {
+        klog(L_WARN, "graphics: raw image has no usable size (s=%d, r=%d, %zu bytes)",
+             s_val, rows, n);
+        return NULL;
+    }
+    if (n < (size_t)pw * ph * bpp) {
+        klog(L_WARN, "graphics: raw image is short (%zu bytes for %dx%d)", n, pw, ph);
+        return NULL;
+    }
+    uint8_t *out = malloc((size_t)pw * ph * 4);
+    if (!out)
+        return NULL;
+    for (long long i = 0; i < (long long)pw * ph; i++) {
+        out[i * 4 + 0] = raw[i * bpp + 0];
+        out[i * 4 + 1] = raw[i * bpp + 1];
+        out[i * 4 + 2] = raw[i * bpp + 2];
+        out[i * 4 + 3] = bpp == 4 ? raw[i * bpp + 3] : 255;
+    }
+    *w = pw;
+    *h = ph;
+    return out;
+}
+
+/* The renderer composites image texels as c + bg*(1-c.a) with no GL blending — the same rule the
+   color-emoji atlas follows — so the texels must already be premultiplied.
+   Rounding is +128, NOT +255: (x*255 + 255)/255 == 256 for x == 255, and the cast to uint8_t turned a
+   fully opaque WHITE pixel black (found by the test in tests/test_vt.c, missed by the s68 probe whose
+   sample pixel was never white). */
+static void premultiply(uint8_t *rgba, long long npix)
+{
+    for (long long i = 0; i < npix; i++) {
+        unsigned a = rgba[i * 4 + 3];
+        for (int k = 0; k < 3; k++)
+            rgba[i * 4 + k] = (uint8_t)((rgba[i * 4 + k] * a + 128) / 255);
+    }
+}
+
+/* Turn the assembled payload into premultiplied RGBA. The payload's own magic wins over f=,
+   because a PNG is self-describing and an application may set f= loosely. */
+static uint8_t *decode_image(const KittyTx *tx, int *w, int *h)
+{
+    const uint8_t *raw = tx->buf;
+    size_t n = tx->len;
+    *w = *h = 0;
+    if (!n) {
+        klog(L_WARN, "graphics: empty payload");
+        return NULL;
+    }
+    uint8_t *inf = NULL;
+    size_t infn = 0;
+    if (n >= 2 && raw[0] == 0x78) {
+        inf = zinflate(raw, n, &infn);
+        if (inf) {
+            raw = inf;
+            n = infn;
+        }
+    }
+    static const uint8_t png_magic[8] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' };
+    uint8_t *out = NULL;
+    if (n >= 8 && !memcmp(raw, png_magic, 8))
+        out = decode_png(raw, n, w, h);
+    else if (tx->fmt == 24 || tx->fmt == 32)
+        out = decode_raw(tx->fmt, tx->pw, tx->ph, raw, n, w, h);
+    else
+        klog(L_WARN, "graphics: unsupported payload (f=%d, %zu bytes)", tx->fmt, n);
+    free(inf);
+    if (!out)
+        return NULL;
+    premultiply(out, (long long)(*w) * (*h));
+    return out;
+}
+
+/* ---------- the image list ---------- */
+
+static void image_free(KImage *im)
+{
+    free(im->rgba);
+    free(im);
+}
+
+static void term_free_images(Term *t)
+{
+    KImage *im = t->images;
+    while (im) {
+        KImage *nx = im->next;
+        image_free(im);
+        im = nx;
+    }
+    t->images = NULL;
+    t->image_bytes = 0;
+}
+
+int term_image_count(const Term *t)
+{
+    int n = 0;
+    for (const KImage *im = t->images; im; im = im->next)
+        n++;
+    return n;
+}
+
+/* Append, keeping the list oldest first: the byte budget evicts from the front, which is also the
+   order the user scrolls past. */
+static void image_append(Term *t, KImage *im)
+{
+    KImage **pp = &t->images;
+    while (*pp)
+        pp = &(*pp)->next;
+    *pp = im;
+    im->next = NULL;
+    t->image_bytes += (long long)im->w * im->h * 4;
+}
+
+static KImage *image_find(Term *t, const KittyTx *tx)
+{
+    int id = tx->use_last ? t->image_last_id : tx->id;
+    if (!id)
+        return NULL;
+    for (KImage *im = t->images; im; im = im->next)
+        if (im->app_id == id)
+            return im;
+    return NULL;
+}
+
+/* The span an image covers, in cells. An explicit c=/r= wins; otherwise its pixel size divided by
+   the current cell size (ceil, at least one cell). With no cell size yet — a session that has
+   never been laid out — fall back to one cell per pixel so the arithmetic stays finite. When only
+   ONE of c=/r= was given the other follows the picture's own aspect ratio (the protocol scales the
+   picture into the cell area it named), and that has to be decided HERE rather than in the renderer:
+   the span is also what a=T moves the cursor past and what image_prune() measures, so a span that
+   disagreed with what is drawn would move the prompt to the wrong row. */
+static int image_span_rows(const Term *t, const KImage *im)
+{
+    if (im->rows > 0)
+        return im->rows;
+    if (im->cols > 0 && t->cell_w > 0 && t->cell_h > 0 && im->w > 0 && im->h > 0) {
+        long long num = (long long)im->cols * t->cell_w * im->h;
+        long long den = (long long)im->w * t->cell_h;
+        return imax_(1, (int)((num + den - 1) / den));
+    }
+    int ch = t->cell_h > 0 ? t->cell_h : im->h;
+    if (ch < 1)
+        ch = 1;
+    return imax_(1, (im->h + ch - 1) / ch);
+}
+
+static int image_span_cols(const Term *t, const KImage *im)
+{
+    if (im->cols > 0)
+        return im->cols;
+    if (im->rows > 0 && t->cell_w > 0 && t->cell_h > 0 && im->w > 0 && im->h > 0) {
+        long long num = (long long)im->rows * t->cell_h * im->w;
+        long long den = (long long)im->h * t->cell_w;
+        return imax_(1, (int)((num + den - 1) / den));
+    }
+    int cw = t->cell_w > 0 ? t->cell_w : im->w;
+    if (cw < 1)
+        cw = 1;
+    return imax_(1, (im->w + cw - 1) / cw);
+}
+
+void term_set_cell_px(Term *t, int w, int h)
+{
+    t->cell_w = w > 0 ? w : 0;
+    t->cell_h = h > 0 ? h : 0;
+}
+
+/* The images of this session that are at least partly inside the viewport, in the order they must
+   be drawn (z ascending, then arrival). crow may be negative and the span may run past the bottom
+   — render.c clips the quad, and it needs the UNCLIPPED rect to get the texture coordinates right. */
+int term_visible_images(Term *t, ImgView *out, int cap)
+{
+    Grid *g = &t->g;
+    int n = 0;
+    for (KImage *im = t->images; im; im = im->next) {
+        if (!im->shown || im->alt != (t->alt_screen ? 1 : 0))
+            continue;
+        int rows = image_span_rows(t, im);
+        int cols = image_span_cols(t, im);
+        int crow = (int)(im->doc_row - g->row_base - g->scroll_off);
+        int ccol = im->col;
+        if (crow >= g->rows || crow + rows <= 0)
+            continue;                       /* fully above or below the viewport */
+        if (ccol >= g->cols || ccol + cols <= 0)
+            continue;                       /* fully left or right of the grid */
+        if (n >= cap)
+            continue;                       /* room only for the first `cap` */
+        out[n].img = im;
+        out[n].crow = crow;
+        out[n].ccol = ccol;
+        out[n].crows = rows;
+        out[n].ccols = cols;
+        n++;
+    }
+    for (int i = 1; i < n; i++) {     /* insertion sort: n is a handful at most */
+        ImgView key = out[i];
+        int j = i - 1;
+        while (j >= 0 && (out[j].img->z > key.img->z ||
+                          (out[j].img->z == key.img->z && out[j].img->serial > key.img->serial))) {
+            out[j + 1] = out[j];
+            j--;
+        }
+        out[j + 1] = key;
+    }
+    return n;
+}
+
+/* Drop images whose anchor rows no longer exist in this grid: evicted above the retained window,
+   or anchored below it (erase_scrollback moves the viewport to slots 0..rows-1 and blanks the
+   rest, so anything anchored there sits in a free slot). */
+static void image_prune(Term *t)
+{
+    Grid *g = &t->g;
+    if (!t->images)
+        return;
+    int64_t first = g->row_base;
+    int64_t last = g->row_base + g->scroll_off + g->rows;   /* exclusive */
+    KImage **pp = &t->images;
+    while (*pp) {
+        KImage *im = *pp;
+        int rows = image_span_rows(t, im);
+        if (im->doc_row + rows <= first || im->doc_row >= last) {
+            *pp = im->next;
+            t->image_bytes -= (long long)im->w * im->h * 4;
+            image_free(im);
+            continue;
+        }
+        pp = &im->next;
+    }
+}
+
+/* Ceiling for a session that keeps showing images (a video played with timg -V sends a frame per
+   step). The oldest go first; the renderer notices the serial disappear and frees its texture. */
+static void image_budget(Term *t)
+{
+    while (t->images &&
+           (t->image_bytes > IMAGE_BYTES_MAX || term_image_count(t) > IMAGE_COUNT_MAX)) {
+        KImage *oldest = t->images;
+        t->images = oldest->next;
+        t->image_bytes -= (long long)oldest->w * oldest->h * 4;
+        klog(L_DEBUG, "graphics: dropped image %d (%d x %d px) to stay within the budget",
+             oldest->serial, oldest->w, oldest->h);
+        image_free(oldest);
+    }
+}
+
+static void image_place(Term *t, KImage *im, int move_cursor)
+{
+    Grid *g = &t->g;
+    /* A cursor left past the right margin (the pending-wrap state putch() enters after the last
+       column) is resolved here exactly the way putch() resolves it for the next character: the
+       picture starts at the left edge of the next row. Anchoring it at col == cols put it entirely
+       outside the grid — measured with `timg -p k` run after its own verbose output had filled a
+       line: the image decoded fine and was never drawn. */
+    if (t->wrap_next && t->cx >= g->cols) {
+        t->cx = 0;
+        g->wrap[g->scroll_off + t->cy] = 1;
+        linefeed(t);
+    }
+    if (t->cx >= g->cols)                /* defensive: an anchor must be a real column */
+        t->cx = g->cols - 1;
+    im->doc_row = g->row_base + g->scroll_off + t->cy;
+    im->col = t->cx;
+    im->alt = t->alt_screen ? 1 : 0;
+    im->shown = 1;
+    if (!move_cursor)
+        return;
+    /* a=T transmits, displays AND moves the cursor below the picture: timg emits the image and
+       then a single CR LF, so the terminal is what has to leave the prompt under it. linefeed()
+       is used rather than cy += rows because a picture taller than the viewport must scroll the
+       screen, exactly like printing that many lines would. */
+    int rows = image_span_rows(t, im);
+    for (int i = 0; i < rows; i++)
+        linefeed(t);
+    t->wrap_next = 0;
+    cluster_invalidate(t);
+}
+
+static void image_delete(Term *t, const KittyTx *tx)
+{
+    int id = tx->use_last ? t->image_last_id : tx->id;
+    int scope = tx->del;
+    int64_t cur = t->g.row_base + t->g.scroll_off + t->cy;
+    KImage **pp = &t->images;
+    int gone = 0;
+    while (*pp) {
+        KImage *im = *pp;
+        int hit = 0;
+        if (scope == 'A')
+            hit = 1;
+        else if (scope == 'I' || scope == 0)
+            hit = (id != 0 && im->app_id == id);
+        else if (scope == 'R')
+            hit = (im->doc_row >= cur);
+        else if (scope == 'C')
+            hit = (im->doc_row == cur);
+        if (hit) {
+            *pp = im->next;
+            t->image_bytes -= (long long)im->w * im->h * 4;
+            image_free(im);
+            gone++;
+        } else {
+            pp = &im->next;
+        }
+    }
+    if (gone)
+        klog(L_DEBUG, "graphics: deleted %d image(s)", gone);
+}
+
+/* ---------- the control block ---------- */
+
+static void kitty_ctl_reset(KittyTx *tx)
+{
+    tx->active = 0;
+    tx->more = 0;
+    tx->len = 0;
+    tx->act = 0;
+    tx->fmt = 0;
+    tx->id = 0;
+    tx->pid = 0;
+    tx->use_last = 0;
+    tx->pw = 0;
+    tx->ph = 0;
+    tx->r_raw = 0;
+    tx->cols = 0;
+    tx->rows = 0;
+    tx->xoff = 0;
+    tx->yoff = 0;
+    tx->z = 0;
+    tx->q = 0;
+    tx->del = 0;
+}
+
+/* Parse `k=v;k=v;...` — and, because timg 1.6.3 writes `k=v,k=v,...`, ',' is accepted as a
+   separator too. Returns 1 when an action (a=) was named, which is how a continuation chunk is
+   recognised: timg's second chunk carries only q= and m=, so everything else must be inherited
+   from the chunk that started the transmission. */
+static int kitty_ctl_parse(KittyTx *tx, const char *ctl)
+{
+    int saw_act = 0, ttype = 0;
+    const char *p = ctl;
+    while (p && *p) {
+        const char *end = strpbrk(p, ";,");
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        const char *eq = memchr(p, '=', len);
+        if (eq && len >= 2) {
+            char key = p[0];
+            const char *val = eq + 1;
+            size_t vlen = len - (size_t)(eq - p) - 1;
+            char num[24];
+            long v = 0;
+            /* a leading '-' belongs to the value: z= is documented to take negative indices */
+            size_t dig = (vlen > 0 && val[0] == '-') ? 1 : 0;
+            int isnum = vlen > dig && vlen < sizeof num;
+            for (size_t i = dig; isnum && i < vlen; i++)
+                if (val[i] < '0' || val[i] > '9')
+                    isnum = 0;
+            if (isnum) {
+                memcpy(num, val, vlen);
+                num[vlen] = 0;
+                v = strtol(num, NULL, 10);
+            }
+            switch (key) {
+            case 'a': tx->act = val[0]; saw_act = 1; break;
+            case 'f': tx->fmt = (int)v; break;
+            case 'i': tx->id = (int)v; break;
+            case 'u': tx->pid = (int)v; break;
+            case 'U': tx->use_last = (int)v; break;
+            case 'm': tx->more = (int)v; break;
+            case 's': tx->pw = (int)v; break;
+            case 'r': tx->r_raw = (int)v; break;
+            case 'c': tx->cols = (int)v; break;
+            case 'x': tx->xoff = (int)v; break;
+            case 'y': tx->yoff = (int)v; break;
+            case 'z': tx->z = (int)v; break;
+            case 'q': tx->q = (int)v; break;
+            case 'd': tx->del = val[0]; break;
+            case 't': ttype = val[0]; break;
+            default: break;      /* w/h/X/Y crop, o/e, v: not implemented, ignored */
+            }
+        }
+        p = end ? end + 1 : NULL;
+    }
+    /* r= means height in px for the raw formats and rows of the grid for the self-describing
+       ones; f= may come after r=, hence deciding it here. */
+    if (tx->fmt == 24 || tx->fmt == 32)
+        tx->ph = tx->r_raw;
+    else
+        tx->rows = tx->r_raw;
+    if (ttype == 'f' || ttype == 't' || ttype == 'v')
+        klog(L_WARN, "graphics: file transmission (t=%c) is not supported", ttype);
+    return saw_act;
+}
+
+static void kitty_tx_free(Parser *ps)
+{
+    free(ps->tx.buf);
+    ps->tx.buf = NULL;
+    ps->tx.cap = 0;
+    ps->tx.len = 0;
+    ps->tx.active = 0;
+}
+
+static void kitty_tx_grow(KittyTx *tx, size_t need)
+{
+    if (need <= tx->cap)
+        return;
+    size_t cap = tx->cap ? tx->cap : 4096;
+    while (cap < need)
+        cap *= 2;
+    uint8_t *b = realloc(tx->buf, cap);
+    if (!b) {
+        klog(L_WARN, "graphics: out of memory for a %zu byte image payload", cap);
+        return;
+    }
+    tx->buf = b;
+    tx->cap = cap;
+}
+
+/* The transmission is complete: decode it and carry out the action. */
+static void kitty_complete(Term *t, KittyTx *tx)
+{
+    switch (tx->act) {
+    case 't': case 'T': case 'f': {
+        int w = 0, h = 0;
+        uint8_t *rgba = decode_image(tx, &w, &h);
+        if (!rgba) {
+            if (tx->q == 2)
+                term_respond(t, "\x1b_G:EBMP;i=%d\x1b\\", tx->id);
+            break;
+        }
+        /* Does this transmission name an id that is already on the list? The protocol identifies an
+           image by that id, so re-transmitting to it REPLACES that image instead of leaving another
+           copy behind (measured with timg 1.6.3 -V: a four-frame gif alternates between TWO ids, and
+           treating every transmission as new stacks four pictures where two belong). a=f and a=t keep
+           the existing placement; a=T re-places at the cursor and moves it, like any new picture. */
+        KImage *im = image_find(t, tx);
+        if (im) {
+            t->image_bytes -= (long long)im->w * im->h * 4;
+            free(im->rgba);
+            im->rgba = rgba;
+            im->w = w;
+            im->h = h;
+            im->version++;
+            t->image_bytes += (long long)w * h * 4;
+            if (tx->cols > 0)
+                im->cols = tx->cols;
+            if (tx->rows > 0)
+                im->rows = tx->rows;
+            im->z = tx->z;
+            if (tx->act == 'T')
+                image_place(t, im, 1);
+        } else {
+            im = calloc(1, sizeof *im);
+            if (!im) {
+                free(rgba);
+                break;
+            }
+            im->serial = ++t->image_serial;
+            im->app_id = tx->id;
+            im->rgba = rgba;
+            im->w = w;
+            im->h = h;
+            im->cols = tx->cols;
+            im->rows = tx->rows;
+            im->px = tx->xoff;
+            im->py = tx->yoff;
+            im->z = tx->z;
+            im->version = 1;
+            image_append(t, im);
+            if (tx->id)
+                t->image_last_id = tx->id;
+            if (tx->act == 'T')
+                image_place(t, im, 1);
+            /* a=t only transmits: the image waits for a later a=p/a=c to be placed. */
+        }
+        if (tx->q == 1)
+            term_respond(t, "\x1b_G:OK;i=%d\x1b\\", im->app_id ? im->app_id : im->serial);
+        image_budget(t);
+        break;
+    }
+    case 'p': case 'c': {
+        KImage *im = image_find(t, tx);
+        if (!im) {
+            klog(L_DEBUG, "graphics: no image %d to display", tx->id);
+            if (tx->q == 2)
+                term_respond(t, "\x1b_G:ENOENT;i=%d\x1b\\", tx->id);
+            break;
+        }
+        if (tx->cols > 0)
+            im->cols = tx->cols;
+        if (tx->rows > 0)
+            im->rows = tx->rows;
+        image_place(t, im, 0);
+        if (tx->q == 1)
+            term_respond(t, "\x1b_G:OK;i=%d\x1b\\", im->app_id);
+        break;
+    }
+    case 'd':
+        image_delete(t, tx);
+        break;
+    default:
+        klog(L_DEBUG, "graphics: action a=%c ignored", tx->act ? tx->act : '?');
+        break;
+    }
+}
+
+/* One complete APC payload (the parser already stripped ESC _ G and the terminator). */
+static void kitty_apc(Term *t, const char *s)
+{
+    Parser *ps = &t->ps;
+    KittyTx *tx = &ps->tx;
+
+    /* Split control block from payload. The protocol says the payload follows a ':', but timg
+       1.6.3 writes `a=T,i=...,f=100,m=0;<base64>` — a ';' — and separates the keys with ','.
+       So: walk control elements (`letter=value`, separated by ';' or ','), and the payload is
+       whatever follows the last of them, or everything after the first ':' if one comes first.
+       Base64 never contains ':', ';' or ',', so the walk cannot run past the payload. */
+    const char *ctl_end = s + strlen(s);
+    const char *payload = NULL;
+    {
+        const char *p = s;
+        for (;;) {
+            const char *co = strchr(p, ':');
+            const char *sc = strpbrk(p, ";,");
+            if (co && (!sc || co < sc)) {          /* the documented separator */
+                ctl_end = co;
+                payload = co + 1;
+                break;
+            }
+            const char *elem_end = sc ? sc : p + strlen(p);
+            size_t elen = (size_t)(elem_end - p);
+            int is_ctrl = elen >= 2 && p[1] == '=' &&
+                          ((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z'));
+            if (!is_ctrl) {                        /* the payload starts here */
+                ctl_end = p;
+                payload = p;
+                break;
+            }
+            if (!sc) {                             /* control block ends the string */
+                ctl_end = elem_end;
+                break;
+            }
+            p = sc + 1;
+        }
+    }
+    size_t ctln = (size_t)(ctl_end - s);
+    if (ctln >= 4096) {
+        klog(L_WARN, "graphics: control block too long (%zu bytes), ignored", ctln);
+        return;
+    }
+    char ctl[4096];
+    memcpy(ctl, s, ctln);
+    ctl[ctln] = 0;
+    size_t plen = payload ? strlen(payload) : 0;
+
+    /* Start from the state a previous chunk left behind, so a continuation chunk (which names
+       only m=) inherits the format, the id and the size of the chunk that began the transfer. */
+    KittyTx nt = *tx;
+    nt.more = 0;
+    int saw_act = kitty_ctl_parse(&nt, ctl);
+    if (saw_act) {
+        if (tx->active && tx->len)
+            klog(L_DEBUG, "graphics: transmission interrupted, %zu bytes dropped", tx->len);
+        kitty_ctl_reset(&nt);
+        /* kitty_ctl_reset cleared the fields a fresh parse must re-fill; re-parse into the
+           cleared state so a key the new chunk omits really is absent. */
+        saw_act = kitty_ctl_parse(&nt, ctl);
+    } else if (!tx->active) {
+        klog(L_DEBUG, "graphics: APC chunk with no action and nothing in progress, ignored");
+        return;
+    }
+    /* nt carries the same buf/cap pointers tx did (it is a copy), so assigning it is safe. */
+    *tx = nt;
+    if (saw_act)
+        tx->len = 0;
+    tx->active = 1;
+
+    if (plen) {
+        kitty_tx_grow(tx, tx->len + (plen / 4 + 1) * 3);
+        tx->len += b64_decode(payload, plen, tx->buf + tx->len);
+    }
+
+    if (tx->more)
+        return;
+    tx->active = 0;
+    kitty_complete(t, tx);
+    tx->len = 0;
+}
+
+/* ---------- APC / DCS parser states ---------- */
+
+static void apc_end(Parser *ps)
+{
+    Term *t = ps->t;
+    if (ps->apc_len < ps->apc_cap)
+        ps->apc[ps->apc_len] = 0;
+    if (ps->apc_drop) {
+        klog(L_WARN, "graphics: APC payload over %u bytes, discarded", APC_BYTES_MAX);
+    } else if (ps->apc_kind == 'G' && ps->apc_len) {
+        kitty_apc(t, ps->apc);
+    }
+    ps->apc_len = 0;
+    ps->apc_drop = 0;
+    ps->apc_kind = 0;
+}
+
+static void apc_put(Parser *ps, uint8_t b)
+{
+    if (ps->apc_drop)
+        return;
+    if (ps->apc_len + 1 >= ps->apc_cap) {
+        if (ps->apc_cap >= APC_BYTES_MAX) {
+            ps->apc_drop = 1;
+            return;
+        }
+        size_t cap = ps->apc_cap ? ps->apc_cap : 8192;
+        if (cap * 2 > APC_BYTES_MAX)
+            cap = APC_BYTES_MAX;
+        else
+            cap *= 2;
+        char *b2 = realloc(ps->apc, cap);
+        if (!b2) {
+            ps->apc_drop = 1;
+            return;
+        }
+        ps->apc = b2;
+        ps->apc_cap = cap;
+    }
+    ps->apc[ps->apc_len++] = (char)b;
 }
 
 static void osc_end(Parser *ps)
@@ -1671,6 +2526,12 @@ void term_parse(Term *t, const uint8_t *buf, size_t len)
                       for (int k = 0; k < 32; k++) ps->par[k] = -1;  /* -1 = not seen yet */
                       break;
             case ']': ps->state = PS_OSC; ps->osc_len = 0; break;
+            /* APC: the kitty graphics protocol lives here (ESC _ G). DCS (ESC P) is discarded
+               whole: sixel and friends would otherwise be parsed as text and paint the payload
+               into the grid as garbage characters. */
+            case '_': ps->state = PS_APC; ps->apc_len = 0; ps->apc_drop = 0;
+                      ps->apc_kind = 0; break;
+            case 'P': ps->state = PS_DCS; break;
             case 'D': linefeed(t); break;
             case 'M': cluster_invalidate(t);
                       if (t->cy == t->top) scroll_down(t, t->top, t->bot); else if (t->cy > 0) t->cy--; break;
@@ -1739,9 +2600,48 @@ void term_parse(Term *t, const uint8_t *buf, size_t len)
                 ps->osc[ps->osc_len++] = (char)b;
             continue;
 
+        case PS_APC:
+            if (b == 0x07) { apc_end(ps); ps->state = PS_GROUND; continue; }
+            if (b == 0x1b) {
+                if (i + 1 < len && buf[i + 1] == '\\') {
+                    i++;
+                    apc_end(ps);
+                    ps->state = PS_GROUND;
+                } else {
+                    apc_end(ps);
+                    ps->state = PS_ESC;
+                }
+                continue;
+            }
+            if (ps->apc_len == 0 && !ps->apc_kind) {
+                ps->apc_kind = b;      /* 'G' = graphics; anything else is dropped at apc_end.
+                                          The kind byte is NOT part of the payload. */
+                continue;
+            }
+            apc_put(ps, b);
+            continue;
+
+        case PS_DCS:
+            if (b == 0x07) { ps->state = PS_GROUND; continue; }
+            if (b == 0x1b) {
+                if (i + 1 < len && buf[i + 1] == '\\') {
+                    i++;
+                    ps->state = PS_GROUND;
+                } else {
+                    ps->state = PS_ESC;
+                }
+                continue;
+            }
+            continue;                  /* discarded: sixel and every other DCS extension */
+
         default:
             ps->state = PS_GROUND;
             continue;
         }
     }
+
+    /* Rows may have been evicted, rotated or re-wrapped by what was just parsed; images anchored
+       to rows that no longer exist are dropped here, once per burst rather than per escape
+       sequence. */
+    image_prune(t);
 }
